@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
 import JSZip from 'jszip';
@@ -25,6 +25,7 @@ import {
   Copy,
   Check,
   QrCode,
+  RefreshCw,
 } from 'lucide-react';
 
 const WEDDING_COLOR_SWATCHES = [
@@ -53,11 +54,75 @@ export default function CoupleBackroomPage() {
   const [wishes, setWishes] = useState<GuestWish[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [uploadingCover, setUploadingCover] = useState(false);
   const [uploadingPreWedding, setUploadingPreWedding] = useState(false);
   const [zipping, setZipping] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [origin, setOrigin] = useState('https://onehearts.app');
+
+  const dirtyFieldsRef = useRef<Set<keyof Wedding>>(new Set());
+
+  function updateField<K extends keyof Wedding>(field: K, value: Wedding[K]) {
+    dirtyFieldsRef.current.add(field);
+    setWedding((prev) => (prev ? { ...prev, [field]: value } : prev));
+  }
+
+  function getDirtyOverrides(current: Wedding): Partial<Wedding> {
+    const overrides: Partial<Wedding> = {};
+    dirtyFieldsRef.current.forEach((key) => {
+      (overrides as Record<string, unknown>)[key] = current[key];
+    });
+    return overrides;
+  }
+
+  const fetchLatestWedding = useCallback(async (weddingId: string): Promise<Wedding | null> => {
+    const { data } = await supabase
+      .from('weddings')
+      .select('*')
+      .eq('id', weddingId)
+      .single();
+    return (data as Wedding) || null;
+  }, []);
+
+  const syncWeddingData = useCallback(
+    async (weddingId: string, showToast = false) => {
+      setSyncing(true);
+      try {
+        const [latestWedding, { data: p }, { data: w }] = await Promise.all([
+          fetchLatestWedding(weddingId),
+          supabase
+            .from('guest_photos')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('guest_wishes')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false }),
+        ]);
+
+        if (latestWedding) {
+          dirtyFieldsRef.current.clear();
+          setWedding(latestWedding);
+        }
+        setPhotos(p || []);
+        setWishes(w || []);
+
+        if (showToast) {
+          notify({
+            title: 'Synced with latest updates',
+            description: 'Fetched the newest changes from the server.',
+            variant: 'info',
+          });
+        }
+      } finally {
+        setSyncing(false);
+      }
+    },
+    [fetchLatestWedding, notify]
+  );
 
   useEffect(() => {
     setOrigin(window.location.origin);
@@ -70,33 +135,86 @@ export default function CoupleBackroomPage() {
         return;
       }
 
+      const cleanEmail = (user.email || '').trim();
       const { data: weddingData } = await supabase
         .from('weddings')
         .select('*')
-        .or(`couple_user_id.eq.${user.id},couple_email.ilike.${user.email}`)
+        .or(`couple_user_id.eq.${user.id},couple_email.ilike.${cleanEmail}`)
+        .order('created_at', { ascending: false })
+        .limit(1)
         .maybeSingle();
 
       if (weddingData) {
         setWedding(weddingData);
-        const [{ data: p }, { data: w }] = await Promise.all([
-          supabase
-            .from('guest_photos')
-            .select('*')
-            .eq('wedding_id', weddingData.id)
-            .order('created_at', { ascending: false }),
-          supabase
-            .from('guest_wishes')
-            .select('*')
-            .eq('wedding_id', weddingData.id)
-            .order('created_at', { ascending: false }),
-        ]);
-        setPhotos(p || []);
-        setWishes(w || []);
+        await syncWeddingData(weddingData.id, false);
       }
       setLoading(false);
     }
     loadCoupleWedding();
-  }, [router]);
+  }, [router, syncWeddingData]);
+
+  // Realtime sync with Admin Studio & Live Guest Uploads
+  useEffect(() => {
+    if (!wedding?.id) return;
+    const weddingId = wedding.id;
+
+    const channel = supabase
+      .channel(`couple-sync-${weddingId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'weddings', filter: `id=eq.${weddingId}` },
+        (payload) => {
+          const incoming = payload.new as Wedding;
+          setWedding((current) => {
+            if (!current || current.id !== incoming.id) return current;
+           const merged: Wedding = { ...incoming };
+            dirtyFieldsRef.current.forEach((key) => {
+              (merged as unknown as Record<string, unknown>)[key] = current[key];
+            });
+            return merged;
+          });
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'guest_photos',
+          filter: `wedding_id=eq.${weddingId}`,
+        },
+        async () => {
+          const { data: p } = await supabase
+            .from('guest_photos')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false });
+          setPhotos(p || []);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'guest_wishes',
+          filter: `wedding_id=eq.${weddingId}`,
+        },
+        async () => {
+          const { data: w } = await supabase
+            .from('guest_wishes')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false });
+          setWishes(w || []);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [wedding?.id]);
 
   async function handleCoverFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -127,9 +245,17 @@ export default function CoupleBackroomPage() {
         .getPublicUrl(filePath);
 
       const newUrl = publicUrlData.publicUrl;
-      await supabase.from('weddings').update({ hero_image_url: newUrl }).eq('id', wedding.id);
+      const { data: fresh } = await supabase
+        .from('weddings')
+        .update({ hero_image_url: newUrl })
+        .eq('id', wedding.id)
+        .select()
+        .single();
 
-      setWedding({ ...wedding, hero_image_url: newUrl });
+      if (fresh) {
+        dirtyFieldsRef.current.delete('hero_image_url');
+        setWedding((prev) => (prev ? { ...fresh, ...getDirtyOverrides(prev) } : fresh));
+      }
       notify({ title: 'Cover photo updated', variant: 'success' });
     } finally {
       setUploadingCover(false);
@@ -163,9 +289,22 @@ export default function CoupleBackroomPage() {
       }
 
       if (newUrls.length > 0) {
-        const merged = [...(wedding.pre_wedding_photos || []), ...newUrls];
-        await supabase.from('weddings').update({ pre_wedding_photos: merged }).eq('id', wedding.id);
-        setWedding({ ...wedding, pre_wedding_photos: merged });
+        const latest = await fetchLatestWedding(wedding.id);
+        const basePhotos = latest?.pre_wedding_photos || wedding.pre_wedding_photos || [];
+        const merged = [...basePhotos, ...newUrls];
+
+        const { data: updatedWedding } = await supabase
+          .from('weddings')
+          .update({ pre_wedding_photos: merged })
+          .eq('id', wedding.id)
+          .select()
+          .single();
+
+        if (updatedWedding) {
+          setWedding((prev) =>
+            prev ? { ...updatedWedding, ...getDirtyOverrides(prev) } : updatedWedding
+          );
+        }
         notify({
           title: `${newUrls.length} portrait(s) added`,
           description: 'Your Pre-Wedding Gallery has been updated.',
@@ -180,9 +319,23 @@ export default function CoupleBackroomPage() {
 
   async function handleRemovePreWeddingPhoto(urlToRemove: string) {
     if (!wedding) return;
-    const filtered = (wedding.pre_wedding_photos || []).filter((url) => url !== urlToRemove);
-    await supabase.from('weddings').update({ pre_wedding_photos: filtered }).eq('id', wedding.id);
-    setWedding({ ...wedding, pre_wedding_photos: filtered });
+
+    const latest = await fetchLatestWedding(wedding.id);
+    const basePhotos = latest?.pre_wedding_photos || wedding.pre_wedding_photos || [];
+    const filtered = basePhotos.filter((url) => url !== urlToRemove);
+
+    const { data: updatedWedding } = await supabase
+      .from('weddings')
+      .update({ pre_wedding_photos: filtered })
+      .eq('id', wedding.id)
+      .select()
+      .single();
+
+    if (updatedWedding) {
+      setWedding((prev) =>
+        prev ? { ...updatedWedding, ...getDirtyOverrides(prev) } : updatedWedding
+      );
+    }
     notify({ title: 'Portrait removed', variant: 'info' });
   }
 
@@ -190,31 +343,51 @@ export default function CoupleBackroomPage() {
     e.preventDefault();
     if (!wedding) return;
     setSaving(true);
-    const { error } = await supabase
-      .from('weddings')
-      .update({
-        partner1_name: wedding.partner1_name,
-        partner2_name: wedding.partner2_name,
-        wedding_date: wedding.wedding_date,
-        venue_name: wedding.venue_name,
-        love_story: wedding.love_story,
-        theme_preset: wedding.theme_preset,
-        custom_primary_color: wedding.custom_primary_color,
-        schedule: wedding.schedule,
-        require_photo_approval: wedding.require_photo_approval,
-        restrict_uploads_until_wedding_day: wedding.restrict_uploads_until_wedding_day,
-      })
-      .eq('id', wedding.id);
 
-    setSaving(false);
-    if (error) {
-      notify({ title: 'Save failed', description: error.message, variant: 'error' });
-    } else {
-      notify({
-        title: 'Wedding page published!',
-        description: 'Your color code, schedule, and details are now live for guests.',
-        variant: 'success',
-      });
+    try {
+      const latest = await fetchLatestWedding(wedding.id);
+
+      const patch: Partial<Wedding> = {};
+      if (dirtyFieldsRef.current.size > 0) {
+        dirtyFieldsRef.current.forEach((field) => {
+          (patch as Record<string, unknown>)[field] = wedding[field];
+        });
+      } else {
+        Object.assign(patch, {
+          partner1_name: wedding.partner1_name,
+          partner2_name: wedding.partner2_name,
+          wedding_date: wedding.wedding_date,
+          venue_name: wedding.venue_name,
+          love_story: wedding.love_story,
+          theme_preset: wedding.theme_preset,
+          custom_primary_color: wedding.custom_primary_color,
+          schedule: wedding.schedule,
+          require_photo_approval: wedding.require_photo_approval,
+          restrict_uploads_until_wedding_day: wedding.restrict_uploads_until_wedding_day,
+        });
+      }
+
+      const { data: savedRow, error } = await supabase
+        .from('weddings')
+        .update(patch)
+        .eq('id', wedding.id)
+        .select()
+        .single();
+
+      if (error) {
+        notify({ title: 'Save failed', description: error.message, variant: 'error' });
+      } else {
+        const finalWedding = savedRow || (latest ? { ...latest, ...patch } : wedding);
+        dirtyFieldsRef.current.clear();
+        setWedding(finalWedding);
+        notify({
+          title: 'Wedding page published!',
+          description: 'Your color code, schedule, and details are now live for guests.',
+          variant: 'success',
+        });
+      }
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -346,7 +519,19 @@ export default function CoupleBackroomPage() {
 
       <header className="bg-white border-b border-[#E8DFD3] px-6 py-4 flex flex-wrap items-center justify-between gap-4">
         <BrandLogo size="md" />
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 sm:gap-4">
+          <button
+            type="button"
+            disabled={syncing}
+            onClick={() => syncWeddingData(wedding.id, true)}
+            className="inline-flex items-center gap-1.5 rounded-full border border-[#E8DFD3] px-3.5 py-2 text-xs font-medium hover:bg-[#FAF8F5] disabled:opacity-60"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`}
+              style={{ color: activeColor }}
+            />
+            {syncing ? 'Syncing...' : 'Sync Latest'}
+          </button>
           <a
             href={`/${wedding.slug}`}
             target="_blank"
@@ -403,7 +588,7 @@ export default function CoupleBackroomPage() {
             </div>
 
             <div className="mt-5 pt-4 border-t border-[#E8DFD3]">
-              <BrandLogo size="sm" showSubtext centered />
+              <BrandLogo size="sm" showSubtext centered href={null} />
             </div>
           </div>
 
@@ -461,7 +646,7 @@ export default function CoupleBackroomPage() {
                   <button
                     key={swatch.hex}
                     type="button"
-                    onClick={() => setWedding({ ...wedding, custom_primary_color: swatch.hex })}
+                    onClick={() => updateField('custom_primary_color', swatch.hex)}
                     className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
                       activeColor.toLowerCase() === swatch.hex.toLowerCase()
                         ? 'border-[#2C2520] bg-white shadow-sm'
@@ -486,17 +671,13 @@ export default function CoupleBackroomPage() {
                     <input
                       type="color"
                       value={activeColor}
-                      onChange={(e) =>
-                        setWedding({ ...wedding, custom_primary_color: e.target.value })
-                      }
+                      onChange={(e) => updateField('custom_primary_color', e.target.value)}
                       className="h-10 w-14 cursor-pointer rounded-lg border border-[#E8DFD3]"
                     />
                     <input
                       type="text"
                       value={activeColor}
-                      onChange={(e) =>
-                        setWedding({ ...wedding, custom_primary_color: e.target.value })
-                      }
+                      onChange={(e) => updateField('custom_primary_color', e.target.value)}
                       className="w-full rounded-xl border border-[#E8DFD3] bg-white px-3 py-2 text-xs font-mono uppercase"
                     />
                   </div>
@@ -507,10 +688,7 @@ export default function CoupleBackroomPage() {
                   <select
                     value={wedding.theme_preset}
                     onChange={(e) =>
-                      setWedding({
-                        ...wedding,
-                        theme_preset: e.target.value as Wedding['theme_preset'],
-                      })
+                      updateField('theme_preset', e.target.value as Wedding['theme_preset'])
                     }
                     className="w-full rounded-xl border border-[#E8DFD3] bg-white px-3 py-2 text-sm"
                   >
@@ -518,6 +696,9 @@ export default function CoupleBackroomPage() {
                     <option value="rose">Soft Blush</option>
                     <option value="sage">Botanical Mist</option>
                     <option value="midnight">Evening Dark</option>
+                    <option value="emerald">Royal Emerald Mist</option>
+                    <option value="burgundy">Velvet Burgundy Blush</option>
+                    <option value="terracotta">Warm Terracotta Clay</option>
                   </select>
                 </div>
               </div>
@@ -530,7 +711,7 @@ export default function CoupleBackroomPage() {
                 <input
                   type="text"
                   value={wedding.partner1_name}
-                  onChange={(e) => setWedding({ ...wedding, partner1_name: e.target.value })}
+                  onChange={(e) => updateField('partner1_name', e.target.value)}
                   className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                 />
               </div>
@@ -539,7 +720,7 @@ export default function CoupleBackroomPage() {
                 <input
                   type="text"
                   value={wedding.partner2_name}
-                  onChange={(e) => setWedding({ ...wedding, partner2_name: e.target.value })}
+                  onChange={(e) => updateField('partner2_name', e.target.value)}
                   className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                 />
               </div>
@@ -552,7 +733,7 @@ export default function CoupleBackroomPage() {
                     if (!e.target.value) return;
                     const parsed = new Date(e.target.value);
                     if (!isNaN(parsed.getTime())) {
-                      setWedding({ ...wedding, wedding_date: parsed.toISOString() });
+                      updateField('wedding_date', parsed.toISOString());
                     }
                   }}
                   className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
@@ -563,7 +744,7 @@ export default function CoupleBackroomPage() {
                 <input
                   type="text"
                   value={wedding.venue_name}
-                  onChange={(e) => setWedding({ ...wedding, venue_name: e.target.value })}
+                  onChange={(e) => updateField('venue_name', e.target.value)}
                   className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                 />
               </div>
@@ -572,7 +753,7 @@ export default function CoupleBackroomPage() {
                 <textarea
                   rows={3}
                   value={wedding.love_story || ''}
-                  onChange={(e) => setWedding({ ...wedding, love_story: e.target.value })}
+                  onChange={(e) => updateField('love_story', e.target.value)}
                   className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                 />
               </div>
@@ -667,18 +848,15 @@ export default function CoupleBackroomPage() {
                 <button
                   type="button"
                   onClick={() =>
-                    setWedding({
-                      ...wedding,
-                      schedule: [
-                        ...(wedding.schedule || []),
-                        {
-                          time: '4:00 PM',
-                          title: 'Reception',
-                          location: 'Main Hall',
-                          description: '',
-                        },
-                      ],
-                    })
+                    updateField('schedule', [
+                      ...(wedding.schedule || []),
+                      {
+                        time: '4:00 PM',
+                        title: 'Reception',
+                        location: 'Main Hall',
+                        description: '',
+                      },
+                    ])
                   }
                   className="inline-flex items-center gap-1 rounded-full border border-[#E8DFD3] px-3 py-1 text-xs hover:bg-[#FAF8F5]"
                 >
@@ -695,7 +873,7 @@ export default function CoupleBackroomPage() {
                       onChange={(e) => {
                         const copy = [...wedding.schedule];
                         copy[idx] = { ...copy[idx], time: e.target.value };
-                        setWedding({ ...wedding, schedule: copy });
+                        updateField('schedule', copy);
                       }}
                       className="rounded-lg border border-[#E8DFD3] bg-white px-2.5 py-1.5 text-xs"
                     />
@@ -706,7 +884,7 @@ export default function CoupleBackroomPage() {
                       onChange={(e) => {
                         const copy = [...wedding.schedule];
                         copy[idx] = { ...copy[idx], title: e.target.value };
-                        setWedding({ ...wedding, schedule: copy });
+                        updateField('schedule', copy);
                       }}
                       className="rounded-lg border border-[#E8DFD3] bg-white px-2.5 py-1.5 text-xs"
                     />
@@ -718,17 +896,17 @@ export default function CoupleBackroomPage() {
                         onChange={(e) => {
                           const copy = [...wedding.schedule];
                           copy[idx] = { ...copy[idx], location: e.target.value };
-                          setWedding({ ...wedding, schedule: copy });
+                          updateField('schedule', copy);
                         }}
                         className="w-full rounded-lg border border-[#E8DFD3] bg-white px-2.5 py-1.5 text-xs"
                       />
                       <button
                         type="button"
                         onClick={() =>
-                          setWedding({
-                            ...wedding,
-                            schedule: wedding.schedule.filter((_, i) => i !== idx),
-                          })
+                          updateField(
+                            'schedule',
+                            wedding.schedule.filter((_, i) => i !== idx)
+                          )
                         }
                         className="rounded-lg border border-rose-200 bg-white px-2 text-rose-600 hover:bg-rose-50"
                       >
@@ -743,7 +921,7 @@ export default function CoupleBackroomPage() {
                     onChange={(e) => {
                       const copy = [...wedding.schedule];
                       copy[idx] = { ...copy[idx], description: e.target.value };
-                      setWedding({ ...wedding, schedule: copy });
+                      updateField('schedule', copy);
                     }}
                     className="w-full rounded-lg border border-[#E8DFD3] bg-white px-2.5 py-1.5 text-xs"
                   />
@@ -757,9 +935,7 @@ export default function CoupleBackroomPage() {
                 <input
                   type="checkbox"
                   checked={wedding.require_photo_approval}
-                  onChange={(e) =>
-                    setWedding({ ...wedding, require_photo_approval: e.target.checked })
-                  }
+                  onChange={(e) => updateField('require_photo_approval', e.target.checked)}
                 />
                 Require our approval before guest photos appear publicly
               </label>
@@ -769,10 +945,7 @@ export default function CoupleBackroomPage() {
                   type="checkbox"
                   checked={Boolean(wedding.restrict_uploads_until_wedding_day)}
                   onChange={(e) =>
-                    setWedding({
-                      ...wedding,
-                      restrict_uploads_until_wedding_day: e.target.checked,
-                    })
+                    updateField('restrict_uploads_until_wedding_day', e.target.checked)
                   }
                 />
                 Restrict guest photo uploads until our wedding day
@@ -785,7 +958,7 @@ export default function CoupleBackroomPage() {
               style={{ backgroundColor: activeColor }}
               className="rounded-full px-6 py-3 text-xs font-semibold text-white shadow-sm hover:opacity-90 transition"
             >
-              {saving ? 'Publishing Changes...' : 'Save & Update My Wedding Page'}
+              {saving ? 'Syncing & Publishing...' : 'Save & Update My Wedding Page'}
             </button>
           </form>
 

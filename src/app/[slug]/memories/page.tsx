@@ -143,8 +143,9 @@ function WeddingMemoriesContent() {
     try {
       for (const file of Array.from(files)) {
         const compressed = await imageCompression(file, {
-          maxSizeMB: 0.6,
-          maxWidthOrHeight: 1600,
+          maxSizeMB: 0.35,
+          maxWidthOrHeight: 1440,
+          initialQuality: 0.8,
           useWebWorker: true,
         });
         const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');

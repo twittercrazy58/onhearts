@@ -100,6 +100,10 @@ export function WeddingInvitationClient() {
   const brandColor = getWeddingBrandColor(wedding);
   const copy = getWeddingCopy(wedding);
 
+  // Featured small spotlight portraits shown above the Love Story
+  const allPortraits = wedding.pre_wedding_photos || [];
+  const spotlightPhotos = allPortraits.slice(0, 3);
+
   function goToMemories(section: 'upload' | 'gallery') {
     if (navigatingTarget || !wedding) return;
     setNavigatingTarget(section);
@@ -156,7 +160,7 @@ export function WeddingInvitationClient() {
             <a href="#story" className="hover:opacity-70">
               {copy.navStory}
             </a>
-            {(wedding.pre_wedding_photos || []).length > 0 && (
+            {allPortraits.length > 0 && (
               <a href="#pre-wedding" className="hover:opacity-70">
                 {copy.navGallery}
               </a>
@@ -247,6 +251,43 @@ export function WeddingInvitationClient() {
         </div>
       </header>
 
+      {/* Featured Couple & Solo Spotlight Strip (Compact Editorial Frames) */}
+      {spotlightPhotos.length > 0 && (
+        <section aria-label="Couple Spotlight" className="max-w-3xl mx-auto px-4 pt-10 pb-2">
+          <div
+            className={`grid gap-3 sm:gap-5 items-center ${
+              spotlightPhotos.length === 1
+                ? 'grid-cols-1 max-w-xs mx-auto'
+                : spotlightPhotos.length === 2
+                  ? 'grid-cols-2 max-w-lg mx-auto'
+                  : 'grid-cols-3'
+            }`}
+          >
+            {spotlightPhotos.map((url, idx) => {
+              const isCenterCard = spotlightPhotos.length === 3 && idx === 1;
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => setLightboxUrl(url)}
+                  style={{ borderColor: `${brandColor}45` }}
+                  className={`group relative aspect-[3/4] rounded-2xl overflow-hidden border-2 shadow-sm cursor-pointer transition duration-500 ${
+                    isCenterCard ? 'sm:-translate-y-3 shadow-md' : ''
+                  }`}
+                >
+                  <img
+                    src={url}
+                    alt={`${wedding.partner1_name} & ${wedding.partner2_name} featured portrait ${idx + 1}`}
+                    className="h-full w-full object-cover group-hover:scale-105 transition duration-500"
+                  />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/15 transition" />
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* Love Story */}
       <section id="story" className="max-w-4xl mx-auto px-4 py-16 text-center">
         <Sparkles style={{ color: brandColor }} className="w-6 h-6 mx-auto mb-3" />
@@ -256,8 +297,8 @@ export function WeddingInvitationClient() {
         </p>
       </section>
 
-      {/* Pre-Wedding Shoot Gallery */}
-      {(wedding.pre_wedding_photos || []).length > 0 && (
+      {/* Full Pre-Wedding Shoot Gallery */}
+      {allPortraits.length > 0 && (
         <section id="pre-wedding" className="max-w-6xl mx-auto px-4 py-12">
           <div className="text-center mb-10">
             <p
@@ -272,7 +313,7 @@ export function WeddingInvitationClient() {
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-            {(wedding.pre_wedding_photos || []).map((url, idx) => (
+            {allPortraits.map((url, idx) => (
               <div
                 key={idx}
                 onClick={() => setLightboxUrl(url)}

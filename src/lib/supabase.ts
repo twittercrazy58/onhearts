@@ -27,7 +27,7 @@ export interface Wedding {
   hero_image_url?: string;
   pre_wedding_photos?: string[];
   love_story?: string;
-  theme_preset: 'champagne' | 'rose' | 'sage' | 'midnight';
+  theme_preset: 'champagne' | 'rose' | 'sage' | 'midnight' | 'emerald' | 'burgundy' | 'terracotta';
   custom_primary_color?: string;
   require_photo_approval: boolean;
   restrict_uploads_until_wedding_day?: boolean;

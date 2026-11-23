@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
 import JSZip from 'jszip';
@@ -23,6 +23,7 @@ import {
   Clock,
   QrCode,
   Upload,
+  RefreshCw,
 } from 'lucide-react';
 
 function toLocalDateTimeInput(isoString: string): string {
@@ -41,11 +42,71 @@ export default function AdminStudioPage() {
   const [photos, setPhotos] = useState<GuestPhoto[]>([]);
   const [wishes, setWishes] = useState<GuestWish[]>([]);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [uploadingCover, setUploadingCover] = useState(false);
   const [uploadingPreWedding, setUploadingPreWedding] = useState(false);
   const [zipping, setZipping] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [origin, setOrigin] = useState('https://onehearts.app');
+
+  // Track only fields modified locally since last load/save so concurrent edits don't overwrite each other
+  const dirtyFieldsRef = useRef<Set<keyof Wedding>>(new Set());
+
+  function updateField<K extends keyof Wedding>(field: K, value: Wedding[K]) {
+    dirtyFieldsRef.current.add(field);
+    setSelectedWedding((prev) => (prev ? { ...prev, [field]: value } : prev));
+  }
+
+  const fetchLatestWedding = useCallback(async (weddingId: string): Promise<Wedding | null> => {
+    const { data } = await supabase
+      .from('weddings')
+      .select('*')
+      .eq('id', weddingId)
+      .single();
+    return (data as Wedding) || null;
+  }, []);
+
+  const syncActiveWeddingData = useCallback(
+    async (weddingId: string, showToast = false) => {
+      setSyncing(true);
+      try {
+        const [latestWedding, { data: p }, { data: w }] = await Promise.all([
+          fetchLatestWedding(weddingId),
+          supabase
+            .from('guest_photos')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('guest_wishes')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false }),
+        ]);
+
+        if (latestWedding) {
+          dirtyFieldsRef.current.clear();
+          setSelectedWedding(latestWedding);
+          setWeddings((prev) =>
+            prev.map((item) => (item.id === latestWedding.id ? latestWedding : item))
+          );
+        }
+        setPhotos(p || []);
+        setWishes(w || []);
+
+        if (showToast) {
+          notify({
+            title: 'Synced with latest updates',
+            description: 'Fetched the newest wedding details, photos, and wishes.',
+            variant: 'info',
+          });
+        }
+      } finally {
+        setSyncing(false);
+      }
+    },
+    [fetchLatestWedding, notify]
+  );
 
   useEffect(() => {
     setOrigin(window.location.origin);
@@ -69,26 +130,72 @@ export default function AdminStudioPage() {
     init();
   }, [router]);
 
+  // Load moderation items + subscribe to live changes from Couple Studio or Guests
   useEffect(() => {
-    if (!selectedWedding) return;
-    async function loadModerationItems() {
-      const [{ data: p }, { data: w }] = await Promise.all([
-        supabase
-          .from('guest_photos')
-          .select('*')
-          .eq('wedding_id', selectedWedding!.id)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('guest_wishes')
-          .select('*')
-          .eq('wedding_id', selectedWedding!.id)
-          .order('created_at', { ascending: false }),
-      ]);
-      setPhotos(p || []);
-      setWishes(w || []);
-    }
-    loadModerationItems();
-  }, [selectedWedding]);
+    if (!selectedWedding?.id) return;
+    const weddingId = selectedWedding.id;
+
+    syncActiveWeddingData(weddingId, false);
+
+    const channel = supabase
+      .channel(`admin-sync-${weddingId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'weddings', filter: `id=eq.${weddingId}` },
+        (payload) => {
+          const incoming = payload.new as Wedding;
+          setWeddings((prev) => prev.map((w) => (w.id === incoming.id ? incoming : w)));
+          setSelectedWedding((current) => {
+            if (!current || current.id !== incoming.id) return current;
+            // Preserve any unsaved local edits while merging remote updates
+            const merged: Wedding = { ...incoming };
+            dirtyFieldsRef.current.forEach((key) => {
+              (merged as unknown as Record<string, unknown>)[key] = current[key];
+            });
+            return merged;
+          });
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'guest_photos',
+          filter: `wedding_id=eq.${weddingId}`,
+        },
+        async () => {
+          const { data: p } = await supabase
+            .from('guest_photos')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false });
+          setPhotos(p || []);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'guest_wishes',
+          filter: `wedding_id=eq.${weddingId}`,
+        },
+        async () => {
+          const { data: w } = await supabase
+            .from('guest_wishes')
+            .select('*')
+            .eq('wedding_id', weddingId)
+            .order('created_at', { ascending: false });
+          setWishes(w || []);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [selectedWedding?.id, syncActiveWeddingData]);
 
   async function handleCreateNewWedding() {
     const slug = `couple-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -131,6 +238,7 @@ export default function AdminStudioPage() {
     }
 
     if (data) {
+      dirtyFieldsRef.current.clear();
       setWeddings([data, ...weddings]);
       setSelectedWedding(data);
       notify({
@@ -143,20 +251,31 @@ export default function AdminStudioPage() {
 
   async function handleStatusChange(status: 'draft' | 'live' | 'archived') {
     if (!selectedWedding) return;
-    const { error } = await supabase
+    const { data: updated, error } = await supabase
       .from('weddings')
       .update({ status })
-      .eq('id', selectedWedding.id);
+      .eq('id', selectedWedding.id)
+      .select()
+      .single();
 
     if (error) {
       notify({ title: 'Status update failed', description: error.message, variant: 'error' });
       return;
     }
 
-    const updated = { ...selectedWedding, status };
-    setSelectedWedding(updated);
-    setWeddings((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
-    notify({ title: `Wedding marked as ${status.toUpperCase()}`, variant: 'info' });
+    if (updated) {
+      setSelectedWedding((prev) => (prev ? { ...updated, ...getDirtyOverrides(prev) } : updated));
+      setWeddings((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
+      notify({ title: `Wedding marked as ${status.toUpperCase()}`, variant: 'info' });
+    }
+  }
+
+  function getDirtyOverrides(current: Wedding): Partial<Wedding> {
+    const overrides: Partial<Wedding> = {};
+    dirtyFieldsRef.current.forEach((key) => {
+      (overrides as Record<string, unknown>)[key] = current[key];
+    });
+    return overrides;
   }
 
   async function handleDeleteWedding(wedding: Wedding) {
@@ -176,6 +295,7 @@ export default function AdminStudioPage() {
       return;
     }
 
+    dirtyFieldsRef.current.clear();
     const remaining = weddings.filter((w) => w.id !== wedding.id);
     setWeddings(remaining);
     setSelectedWedding(remaining[0] || null);
@@ -211,14 +331,18 @@ export default function AdminStudioPage() {
         .getPublicUrl(filePath);
 
       const newUrl = publicUrlData.publicUrl;
-      await supabase
+      const { data: fresh } = await supabase
         .from('weddings')
         .update({ hero_image_url: newUrl })
-        .eq('id', selectedWedding.id);
+        .eq('id', selectedWedding.id)
+        .select()
+        .single();
 
-      const updatedWedding = { ...selectedWedding, hero_image_url: newUrl };
-      setSelectedWedding(updatedWedding);
-      setWeddings((prev) => prev.map((w) => (w.id === updatedWedding.id ? updatedWedding : w)));
+      if (fresh) {
+        dirtyFieldsRef.current.delete('hero_image_url');
+        setSelectedWedding((prev) => (prev ? { ...fresh, ...getDirtyOverrides(prev) } : fresh));
+        setWeddings((prev) => prev.map((w) => (w.id === fresh.id ? fresh : w)));
+      }
       notify({ title: 'Cover photo updated', variant: 'success' });
     } finally {
       setUploadingCover(false);
@@ -264,15 +388,26 @@ export default function AdminStudioPage() {
       }
 
       if (newUrls.length > 0) {
-        const merged = [...(selectedWedding.pre_wedding_photos || []), ...newUrls];
-        await supabase
+        // Fetch the newest DB array first so concurrent uploads from Couple Studio aren't overwritten
+        const latest = await fetchLatestWedding(selectedWedding.id);
+        const basePhotos = latest?.pre_wedding_photos || selectedWedding.pre_wedding_photos || [];
+        const merged = [...basePhotos, ...newUrls];
+
+        const { data: updatedWedding } = await supabase
           .from('weddings')
           .update({ pre_wedding_photos: merged })
-          .eq('id', selectedWedding.id);
+          .eq('id', selectedWedding.id)
+          .select()
+          .single();
 
-        const updatedWedding = { ...selectedWedding, pre_wedding_photos: merged };
-        setSelectedWedding(updatedWedding);
-        setWeddings((prev) => prev.map((w) => (w.id === updatedWedding.id ? updatedWedding : w)));
+        if (updatedWedding) {
+          setSelectedWedding((prev) =>
+            prev ? { ...updatedWedding, ...getDirtyOverrides(prev) } : updatedWedding
+          );
+          setWeddings((prev) =>
+            prev.map((w) => (w.id === updatedWedding.id ? updatedWedding : w))
+          );
+        }
         notify({
           title: `${newUrls.length} pre-wedding portrait(s) uploaded`,
           variant: 'success',
@@ -286,16 +421,27 @@ export default function AdminStudioPage() {
 
   async function handleRemovePreWeddingPhoto(urlToRemove: string) {
     if (!selectedWedding) return;
-    const filtered = (selectedWedding.pre_wedding_photos || []).filter((url) => url !== urlToRemove);
 
-    await supabase
+    // Fetch latest DB array before filtering so concurrent additions stay intact
+    const latest = await fetchLatestWedding(selectedWedding.id);
+    const basePhotos = latest?.pre_wedding_photos || selectedWedding.pre_wedding_photos || [];
+    const filtered = basePhotos.filter((url) => url !== urlToRemove);
+
+    const { data: updatedWedding } = await supabase
       .from('weddings')
       .update({ pre_wedding_photos: filtered })
-      .eq('id', selectedWedding.id);
+      .eq('id', selectedWedding.id)
+      .select()
+      .single();
 
-    const updatedWedding = { ...selectedWedding, pre_wedding_photos: filtered };
-    setSelectedWedding(updatedWedding);
-    setWeddings((prev) => prev.map((w) => (w.id === updatedWedding.id ? updatedWedding : w)));
+    if (updatedWedding) {
+      setSelectedWedding((prev) =>
+        prev ? { ...updatedWedding, ...getDirtyOverrides(prev) } : updatedWedding
+      );
+      setWeddings((prev) =>
+        prev.map((w) => (w.id === updatedWedding.id ? updatedWedding : w))
+      );
+    }
     notify({ title: 'Pre-wedding photo removed', variant: 'info' });
   }
 
@@ -304,45 +450,80 @@ export default function AdminStudioPage() {
     if (!selectedWedding) return;
     setSaving(true);
 
-    const { error } = await supabase
-      .from('weddings')
-      .update(selectedWedding)
-      .eq('id', selectedWedding.id);
+    try {
+      // 1. Fetch the newest row from Supabase before saving
+      const latest = await fetchLatestWedding(selectedWedding.id);
 
-    setSaving(false);
-    if (error) {
-      notify({ title: 'Save failed', description: error.message, variant: 'error' });
-      return;
+      // 2. Build a patch containing ONLY fields modified in this session (or full payload if none tracked)
+      const patch: Partial<Wedding> = {};
+      if (dirtyFieldsRef.current.size > 0) {
+        dirtyFieldsRef.current.forEach((field) => {
+          if (field === 'couple_email') {
+            patch.couple_email = selectedWedding.couple_email?.trim().toLowerCase() || null;
+          } else {
+            (patch as Record<string, unknown>)[field] = selectedWedding[field];
+          }
+        });
+      } else {
+        Object.assign(patch, {
+          ...selectedWedding,
+          couple_email: selectedWedding.couple_email?.trim().toLowerCase() || null,
+        });
+      }
+
+      const { data: savedRow, error } = await supabase
+        .from('weddings')
+        .update(patch)
+        .eq('id', selectedWedding.id)
+        .select()
+        .single();
+
+      if (error) {
+        notify({ title: 'Save failed', description: error.message, variant: 'error' });
+        return;
+      }
+
+      const finalWedding = savedRow || (latest ? { ...latest, ...patch } : selectedWedding);
+      dirtyFieldsRef.current.clear();
+      setSelectedWedding(finalWedding);
+      setWeddings((prev) =>
+        prev.map((w) => (w.id === finalWedding.id ? finalWedding : w))
+      );
+      notify({
+        title: 'Wedding published!',
+        description: 'Merged with latest data and saved live.',
+        variant: 'success',
+      });
+    } finally {
+      setSaving(false);
     }
-
-    setWeddings((prev) => prev.map((w) => (w.id === selectedWedding.id ? selectedWedding : w)));
-    notify({
-      title: 'Wedding published!',
-      description: 'All changes are now live.',
-      variant: 'success',
-    });
   }
 
   function addScheduleItem() {
     if (!selectedWedding) return;
     const nextSchedule: ScheduleItem[] = [
       ...(selectedWedding.schedule || []),
-      { time: '7:00 PM', title: 'First Dance & Cake Cutting', location: 'Grand Hall', description: '' },
+      {
+        time: '7:00 PM',
+        title: 'First Dance & Cake Cutting',
+        location: 'Grand Hall',
+        description: '',
+      },
     ];
-    setSelectedWedding({ ...selectedWedding, schedule: nextSchedule });
+    updateField('schedule', nextSchedule);
   }
 
   function updateScheduleItem(index: number, field: keyof ScheduleItem, value: string) {
     if (!selectedWedding) return;
     const updated = [...(selectedWedding.schedule || [])];
     updated[index] = { ...updated[index], [field]: value };
-    setSelectedWedding({ ...selectedWedding, schedule: updated });
+    updateField('schedule', updated);
   }
 
   function removeScheduleItem(index: number) {
     if (!selectedWedding) return;
     const filtered = (selectedWedding.schedule || []).filter((_, idx) => idx !== index);
-    setSelectedWedding({ ...selectedWedding, schedule: filtered });
+    updateField('schedule', filtered);
   }
 
   async function handleDownloadAllZip() {
@@ -361,7 +542,10 @@ export default function AdminStudioPage() {
             const extension = blob.type.includes('png') ? 'png' : 'jpg';
             const safeGuest = photo.guest_name.replace(/[^a-zA-Z0-9_-]/g, '_') || 'Guest';
             const safeTag = photo.moment_tag.replace(/[^a-zA-Z0-9_-]/g, '_');
-            folder.file(`${String(idx + 1).padStart(3, '0')}_${safeTag}_${safeGuest}.${extension}`, blob);
+            folder.file(
+              `${String(idx + 1).padStart(3, '0')}_${safeTag}_${safeGuest}.${extension}`,
+              blob
+            );
           } catch (err) {
             console.error('Failed to bundle image:', photo.image_url, err);
           }
@@ -451,6 +635,17 @@ export default function AdminStudioPage() {
       <header className="bg-white border-b border-[#E8DFD3] px-6 py-4 flex flex-wrap items-center justify-between gap-4">
         <BrandLogo size="md" />
         <div className="flex items-center gap-3">
+          {selectedWedding && (
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={() => syncActiveWeddingData(selectedWedding.id, true)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-[#E8DFD3] px-3.5 py-2 text-xs font-medium hover:bg-[#FAF8F5] disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-[#B8925A] ${syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Syncing...' : 'Sync Latest'}
+            </button>
+          )}
           <button
             onClick={handleCreateNewWedding}
             className="inline-flex items-center gap-1.5 rounded-full bg-[#B8925A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#A37F49] transition"
@@ -479,7 +674,10 @@ export default function AdminStudioPage() {
             {weddings.map((w) => (
               <button
                 key={w.id}
-                onClick={() => setSelectedWedding(w)}
+                onClick={() => {
+                  dirtyFieldsRef.current.clear();
+                  setSelectedWedding(w);
+                }}
                 className={`w-full text-left rounded-2xl p-4 border transition ${
                   selectedWedding?.id === w.id
                     ? 'bg-white border-[#B8925A] shadow-sm'
@@ -531,7 +729,7 @@ export default function AdminStudioPage() {
                 </div>
 
                 <div className="mt-5 pt-4 border-t border-[#E8DFD3]">
-                  <BrandLogo size="sm" showSubtext centered />
+                  <BrandLogo size="sm" showSubtext centered href={null} />
                 </div>
               </div>
 
@@ -627,9 +825,7 @@ export default function AdminStudioPage() {
                   type="email"
                   placeholder="couple@example.com (grants access to /couple/studio)"
                   value={selectedWedding.couple_email || ''}
-                  onChange={(e) =>
-                    setSelectedWedding({ ...selectedWedding, couple_email: e.target.value })
-                  }
+                  onChange={(e) => updateField('couple_email', e.target.value)}
                   className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                 />
               </div>
@@ -640,9 +836,7 @@ export default function AdminStudioPage() {
                   <input
                     type="text"
                     value={selectedWedding.partner1_name}
-                    onChange={(e) =>
-                      setSelectedWedding({ ...selectedWedding, partner1_name: e.target.value })
-                    }
+                    onChange={(e) => updateField('partner1_name', e.target.value)}
                     className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                   />
                 </div>
@@ -651,9 +845,7 @@ export default function AdminStudioPage() {
                   <input
                     type="text"
                     value={selectedWedding.partner2_name}
-                    onChange={(e) =>
-                      setSelectedWedding({ ...selectedWedding, partner2_name: e.target.value })
-                    }
+                    onChange={(e) => updateField('partner2_name', e.target.value)}
                     className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                   />
                 </div>
@@ -662,29 +854,27 @@ export default function AdminStudioPage() {
                   <input
                     type="text"
                     value={selectedWedding.slug}
-                    onChange={(e) =>
-                      setSelectedWedding({ ...selectedWedding, slug: e.target.value })
-                    }
+                    onChange={(e) => updateField('slug', e.target.value)}
                     className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                   />
                 </div>
                 <div>
                   <label className="text-xs font-medium">Theme Palette</label>
                   <select
-                    value={selectedWedding.theme_preset}
-                    onChange={(e) =>
-                      setSelectedWedding({
-                        ...selectedWedding,
-                        theme_preset: e.target.value as Wedding['theme_preset'],
-                      })
-                    }
-                    className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
-                  >
-                    <option value="champagne">Champagne Gold</option>
-                    <option value="rose">Dusty Rose</option>
-                    <option value="sage">Botanical Sage</option>
-                    <option value="midnight">Midnight &amp; Gold</option>
-                  </select>
+                 value={selectedWedding.theme_preset}
+                onChange={(e) =>
+                  updateField('theme_preset', e.target.value as Wedding['theme_preset'])
+                }
+                className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
+              >
+                <option value="champagne">Champagne Gold</option>
+                <option value="rose">Dusty Rose</option>
+                <option value="sage">Botanical Sage</option>
+                <option value="midnight">Midnight &amp; Gold</option>
+                <option value="emerald">Royal Emerald &amp; Gold</option>
+                <option value="burgundy">Velvet Burgundy &amp; Wine</option>
+                <option value="terracotta">Warm Terracotta &amp; Clay</option>
+              </select>
                 </div>
 
                 <div>
@@ -696,10 +886,7 @@ export default function AdminStudioPage() {
                       if (!e.target.value) return;
                       const parsed = new Date(e.target.value);
                       if (!isNaN(parsed.getTime())) {
-                        setSelectedWedding({
-                          ...selectedWedding,
-                          wedding_date: parsed.toISOString(),
-                        });
+                        updateField('wedding_date', parsed.toISOString());
                       }
                     }}
                     className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
@@ -711,9 +898,7 @@ export default function AdminStudioPage() {
                   <input
                     type="text"
                     value={selectedWedding.venue_name}
-                    onChange={(e) =>
-                      setSelectedWedding({ ...selectedWedding, venue_name: e.target.value })
-                    }
+                    onChange={(e) => updateField('venue_name', e.target.value)}
                     className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                   />
                 </div>
@@ -755,9 +940,7 @@ export default function AdminStudioPage() {
                       type="url"
                       placeholder="https://..."
                       value={selectedWedding.hero_image_url || ''}
-                      onChange={(e) =>
-                        setSelectedWedding({ ...selectedWedding, hero_image_url: e.target.value })
-                      }
+                      onChange={(e) => updateField('hero_image_url', e.target.value)}
                       className="w-full rounded-xl border border-[#E8DFD3] bg-white px-3 py-1.5 text-xs"
                     />
                   </div>
@@ -769,9 +952,7 @@ export default function AdminStudioPage() {
                 <textarea
                   rows={3}
                   value={selectedWedding.love_story || ''}
-                  onChange={(e) =>
-                    setSelectedWedding({ ...selectedWedding, love_story: e.target.value })
-                  }
+                  onChange={(e) => updateField('love_story', e.target.value)}
                   className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
                 />
               </div>
@@ -900,12 +1081,7 @@ export default function AdminStudioPage() {
                   <input
                     type="checkbox"
                     checked={selectedWedding.require_photo_approval}
-                    onChange={(e) =>
-                      setSelectedWedding({
-                        ...selectedWedding,
-                        require_photo_approval: e.target.checked,
-                      })
-                    }
+                    onChange={(e) => updateField('require_photo_approval', e.target.checked)}
                   />
                   Require administrator approval before guest photos appear publicly
                 </label>
@@ -915,10 +1091,7 @@ export default function AdminStudioPage() {
                     type="checkbox"
                     checked={Boolean(selectedWedding.restrict_uploads_until_wedding_day)}
                     onChange={(e) =>
-                      setSelectedWedding({
-                        ...selectedWedding,
-                        restrict_uploads_until_wedding_day: e.target.checked,
-                      })
+                      updateField('restrict_uploads_until_wedding_day', e.target.checked)
                     }
                   />
                   Restrict guest photo uploads until the wedding day
@@ -930,7 +1103,7 @@ export default function AdminStudioPage() {
                 disabled={saving}
                 className="rounded-full bg-[#2C2520] px-6 py-2.5 text-xs font-semibold text-white hover:bg-[#443A33]"
               >
-                {saving ? 'Saving...' : 'Save & Publish Wedding'}
+                {saving ? 'Syncing & Saving...' : 'Save & Publish Wedding'}
               </button>
             </form>
 

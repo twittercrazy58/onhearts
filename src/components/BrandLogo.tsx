@@ -1,4 +1,5 @@
 import React from 'react';
+import Link from 'next/link';
 
 interface BrandLogoProps {
   variant?: 'light' | 'dark';
@@ -6,6 +7,7 @@ interface BrandLogoProps {
   showSubtext?: boolean;
   subtext?: string;
   centered?: boolean;
+  href?: string | null;
 }
 
 export function BrandLogo({
@@ -14,6 +16,7 @@ export function BrandLogo({
   showSubtext = false,
   subtext = 'Powered by ProEdge Software Solutions',
   centered = false,
+  href = '/',
 }: BrandLogoProps) {
   const textColor = variant === 'light' ? 'text-white' : 'text-[#2C2520]';
   const subtextColor = variant === 'light' ? 'text-white/75' : 'text-[#7A6F67]';
@@ -25,7 +28,7 @@ export function BrandLogo({
     lg: { icon: 44, title: 'text-4xl', sub: 'text-sm' },
   }[size];
 
-  return (
+  const logoContent = (
     <div className={`inline-flex flex-col ${centered ? 'items-center text-center' : 'items-start'}`}>
       <div className="flex items-center gap-2.5">
         {/* Minimalist Interlocking Hearts Emblem */}
@@ -63,5 +66,15 @@ export function BrandLogo({
         </span>
       )}
     </div>
+  );
+
+  if (!href) {
+    return logoContent;
+  }
+
+  return (
+    <Link href={href} aria-label="OneHearts Home" className="inline-flex">
+      {logoContent}
+    </Link>
   );
 }
