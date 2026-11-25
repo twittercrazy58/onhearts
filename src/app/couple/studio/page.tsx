@@ -11,6 +11,7 @@ import { BrandLogo } from '@/components/BrandLogo';
 import { LoadingScreen } from '@/components/LoadingScreen';
 import { Footer } from '@/components/Footer';
 import { useFeedback } from '@/components/FeedbackProvider';
+import { PrintableTableQrCard } from '@/components/PrintableTableQrCard';
 import {
   Palette,
   Upload,
@@ -496,27 +497,7 @@ export default function CoupleBackroomPage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-[#2C2520]">
-      <style jsx global>{`
-        @media print {
-          body * {
-            visibility: hidden;
-          }
-          #printable-qr-card,
-          #printable-qr-card * {
-            visibility: visible;
-          }
-          #printable-qr-card {
-            position: fixed;
-            inset: 0;
-            margin: auto;
-            width: 380px;
-            height: fit-content;
-            border: 2px solid ${activeColor} !important;
-            box-shadow: none !important;
-          }
-        }
-      `}</style>
-
+      
       <header className="bg-white border-b border-[#E8DFD3] px-6 py-4 flex flex-wrap items-center justify-between gap-4">
         <BrandLogo size="md" />
         <div className="flex items-center gap-3 sm:gap-4">
@@ -560,37 +541,12 @@ export default function CoupleBackroomPage() {
             <QrCode className="w-3.5 h-3.5" style={{ color: activeColor }} /> Reception Table QR Card
           </h2>
 
-          <div
-            id="printable-qr-card"
-            className="rounded-3xl bg-white border border-[#E8DFD3] p-6 text-center shadow-sm"
-          >
-            <p
-              style={{ color: activeColor }}
-              className="text-[11px] uppercase tracking-[0.22em] font-semibold"
-            >
-              Share The Love
-            </p>
-            <h3 className="font-serif text-2xl font-semibold mt-1">
-              {wedding.partner1_name} &amp; {wedding.partner2_name}
-            </h3>
-            <p className="text-xs text-[#7A6F67] mt-1 mb-5">
-              Scan to upload your wedding photos &amp; view our live memories gallery
-            </p>
-
-            <div className="inline-flex p-4 rounded-2xl border border-[#E8DFD3] bg-[#FAF8F5]">
-              <QRCodeSVG
-                value={guestUploadUrl}
-                size={168}
-                bgColor="#FAF8F5"
-                fgColor="#2C2520"
-                level="M"
-              />
-            </div>
-
-            <div className="mt-5 pt-4 border-t border-[#E8DFD3]">
-              <BrandLogo size="sm" showSubtext centered href={null} />
-            </div>
-          </div>
+         <PrintableTableQrCard
+          partner1Name={wedding.partner1_name}
+          partner2Name={wedding.partner2_name}
+          scanUrl={guestUploadUrl}
+          accentColor={activeColor}
+        />
 
           <div className="grid grid-cols-2 gap-2">
             <button
