@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, usePathname, useRouter } from 'next/navigation';
 import { supabase, Wedding, GuestWish } from '@/lib/supabase';
 import { THEME_PRESETS, getWeddingBrandColor } from '@/lib/themes';
@@ -19,7 +19,21 @@ import {
   Loader2,
   UploadCloud,
   Images,
+  ChevronLeft,
+  ChevronRight,
+  Heart,
 } from 'lucide-react';
+
+type WeddingPhase = 'upcoming' | 'live' | 'completed';
+
+function getWeddingPhase(weddingDateIso: string, nowMs: number): WeddingPhase {
+  const startMs = new Date(weddingDateIso).getTime();
+  if (isNaN(startMs)) return 'upcoming';
+  const eighteenHoursMs = 18 * 60 * 60 * 1000;
+  if (nowMs < startMs) return 'upcoming';
+  if (nowMs <= startMs + eighteenHoursMs) return 'live';
+  return 'completed';
+}
 
 export function WeddingInvitationClient() {
   const { slug } = useParams<{ slug: string }>();
@@ -30,8 +44,9 @@ export function WeddingInvitationClient() {
   const [wedding, setWedding] = useState<Wedding | null>(null);
   const [wishes, setWishes] = useState<GuestWish[]>([]);
   const [loading, setLoading] = useState(true);
-  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [navigatingTarget, setNavigatingTarget] = useState<'upload' | 'gallery' | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   // Guestbook Form State
   const [wishName, setWishName] = useState('');
@@ -39,9 +54,24 @@ export function WeddingInvitationClient() {
   const [wishMessage, setWishMessage] = useState('');
   const [submittingWish, setSubmittingWish] = useState(false);
 
+  // Refs for back-button guard & touch swipe
+  const lightboxOpenRef = useRef(false);
+  const lastBackPressRef = useRef<number>(0);
+  const touchStartXRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    lightboxOpenRef.current = lightboxIndex !== null;
+  }, [lightboxIndex]);
+
   useEffect(() => {
     setNavigatingTarget(null);
   }, [pathname]);
+
+  // Keep current time ticking so countdown transitions live when ceremony time hits
+  useEffect(() => {
+    const interval = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!slug) return;
@@ -68,6 +98,78 @@ export function WeddingInvitationClient() {
     }
     loadWeddingData();
   }, [slug]);
+
+  const allPortraits = wedding?.pre_wedding_photos || [];
+
+  const openLightbox = useCallback((index: number) => {
+    setLightboxIndex(index);
+    if (typeof window !== 'undefined' && !window.history.state?.oneheartsLightbox) {
+      window.history.pushState({ ...window.history.state, oneheartsLightbox: true }, '');
+    }
+  }, []);
+
+  const closeLightbox = useCallback(() => {
+    setLightboxIndex(null);
+    if (typeof window !== 'undefined' && window.history.state?.oneheartsLightbox) {
+      window.history.back();
+    }
+  }, []);
+
+  const showPrevPortrait = useCallback(() => {
+    if (allPortraits.length === 0) return;
+    setLightboxIndex((prev) =>
+      prev === null ? 0 : (prev - 1 + allPortraits.length) % allPortraits.length
+    );
+  }, [allPortraits.length]);
+
+  const showNextPortrait = useCallback(() => {
+    if (allPortraits.length === 0) return;
+    setLightboxIndex((prev) => (prev === null ? 0 : (prev + 1) % allPortraits.length));
+  }, [allPortraits.length]);
+
+  // Keyboard navigation when lightbox is open
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'ArrowLeft') showPrevPortrait();
+      if (e.key === 'ArrowRight') showNextPortrait();
+      if (e.key === 'Escape') closeLightbox();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [lightboxIndex, showPrevPortrait, showNextPortrait, closeLightbox]);
+
+  // Intercept browser/device Back button so guests stay inside the wedding experience
+  useEffect(() => {
+    if (typeof window === 'undefined' || !wedding) return;
+
+    // Seed an entry state so pressing Back once stays on the invitation
+    window.history.replaceState({ ...window.history.state, oneheartsBase: true }, '');
+    window.history.pushState({ ...window.history.state, oneheartsGuard: true }, '');
+
+    function handlePopState() {
+      // 1. If the photo lightbox is open, close it and stay on the page
+      if (lightboxOpenRef.current) {
+        setLightboxIndex(null);
+        return;
+      }
+
+      // 2. Otherwise, prevent accidental single-tap exit from the wedding invitation
+      const now = Date.now();
+      if (now - lastBackPressRef.current > 2000) {
+        lastBackPressRef.current = now;
+        window.history.pushState({ oneheartsGuard: true }, '');
+        notify({
+          title: 'You are viewing the wedding invitation',
+          description: 'Press Back again if you want to leave this page.',
+          variant: 'info',
+        });
+      }
+    }
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [wedding, notify]);
 
   if (loading) {
     return (
@@ -99,10 +201,11 @@ export function WeddingInvitationClient() {
   const isDark = wedding.theme_preset === 'midnight';
   const brandColor = getWeddingBrandColor(wedding);
   const copy = getWeddingCopy(wedding);
+  const phase = getWeddingPhase(wedding.wedding_date, nowMs);
 
-  // Featured small spotlight portraits shown above the Love Story
-  const allPortraits = wedding.pre_wedding_photos || [];
   const spotlightPhotos = allPortraits.slice(0, 3);
+  const activeLightboxUrl =
+    lightboxIndex !== null && allPortraits[lightboxIndex] ? allPortraits[lightboxIndex] : null;
 
   function goToMemories(section: 'upload' | 'gallery') {
     if (navigatingTarget || !wedding) return;
@@ -208,7 +311,11 @@ export function WeddingInvitationClient() {
             style={{ color: brandColor }}
             className="uppercase tracking-[0.25em] text-xs font-semibold"
           >
-            {copy.heroEyebrow}
+            {phase === 'live'
+              ? 'Today Is The Day • Live Celebration'
+              : phase === 'completed'
+                ? 'Happily Ever After • Celebration Archive'
+                : copy.heroEyebrow}
           </p>
           <h1 className="font-serif text-5xl sm:text-7xl font-semibold mt-4">
             {wedding.partner1_name} &amp; {wedding.partner2_name}
@@ -223,7 +330,48 @@ export function WeddingInvitationClient() {
             &bull; {wedding.venue_name}
           </p>
 
-          <CountdownTimer targetDate={wedding.wedding_date} />
+          {/* Dynamic Countdown vs. Live Wedding Day Welcome Banner */}
+          {phase === 'upcoming' && <CountdownTimer targetDate={wedding.wedding_date} />}
+
+          {phase === 'live' && (
+            <div
+              style={{ borderColor: `${brandColor}65`, backgroundColor: `${brandColor}14` }}
+              className="mt-7 mx-auto max-w-xl rounded-3xl border-2 px-6 py-5 backdrop-blur-sm shadow-sm"
+            >
+              <div className="inline-flex items-center gap-2 rounded-full bg-white/90 px-3.5 py-1 text-[11px] font-bold uppercase tracking-widest text-[#2C2520] shadow-xs">
+                <span className="h-2 w-2 rounded-full bg-emerald-500 animate-ping" />
+                Happening Now
+              </div>
+              <h2 className="font-serif text-2xl sm:text-3xl font-semibold mt-2.5">
+                Welcome to Our Wedding Celebration!
+              </h2>
+              <p className={`mt-1.5 text-xs sm:text-sm ${theme.muted}`}>
+                We are so honored to have you here with us today. Enjoy the ceremony, raise a
+                glass, and capture every candid moment into our live album below!
+              </p>
+            </div>
+          )}
+
+          {phase === 'completed' && (
+            <div
+              style={{ borderColor: `${brandColor}50`, backgroundColor: `${brandColor}10` }}
+              className="mt-7 mx-auto max-w-xl rounded-3xl border px-6 py-5 backdrop-blur-sm"
+            >
+              <div
+                style={{ color: brandColor }}
+                className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest"
+              >
+                <Heart className="w-3.5 h-3.5 fill-current" /> Just Married
+              </div>
+              <h2 className="font-serif text-2xl sm:text-3xl font-semibold mt-1.5">
+                Thank You for Celebrating With Us!
+              </h2>
+              <p className={`mt-1.5 text-xs sm:text-sm ${theme.muted}`}>
+                Relive the magic by browsing our shared wedding gallery or adding your favorite
+                photos and wishes to our keepsake archive.
+              </p>
+            </div>
+          )}
 
           {/* Primary Above-The-Fold Guest Photo Upload CTA */}
           <div className="mt-8 flex flex-col items-center gap-2.5">
@@ -240,7 +388,10 @@ export function WeddingInvitationClient() {
                 </>
               ) : (
                 <>
-                  <UploadCloud className="w-5 h-5" /> Upload &amp; View Wedding Photos
+                  <UploadCloud className="w-5 h-5" />{' '}
+                  {phase === 'live'
+                    ? 'Launch Live Wedding Camera & Gallery'
+                    : 'Upload & View Wedding Photos'}
                 </>
               )}
             </button>
@@ -269,7 +420,7 @@ export function WeddingInvitationClient() {
                 <button
                   key={idx}
                   type="button"
-                  onClick={() => setLightboxUrl(url)}
+                  onClick={() => openLightbox(idx)}
                   style={{ borderColor: `${brandColor}45` }}
                   className={`group relative aspect-[3/4] rounded-2xl overflow-hidden border-2 shadow-sm cursor-pointer transition duration-500 ${
                     isCenterCard ? 'sm:-translate-y-3 shadow-md' : ''
@@ -316,7 +467,7 @@ export function WeddingInvitationClient() {
             {allPortraits.map((url, idx) => (
               <div
                 key={idx}
-                onClick={() => setLightboxUrl(url)}
+                onClick={() => openLightbox(idx)}
                 className={`group relative aspect-[4/5] rounded-2xl overflow-hidden border ${theme.border} cursor-pointer shadow-sm`}
               >
                 <img
@@ -483,24 +634,80 @@ export function WeddingInvitationClient() {
         )}
       </button>
 
-      {/* Pre-Wedding Lightbox Modal */}
-      {lightboxUrl && (
+      {/* Pre-Wedding Lightbox Modal with Previous / Next Controls & Swipe */}
+      {activeLightboxUrl && lightboxIndex !== null && (
         <div
-          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4"
-          onClick={() => setLightboxUrl(null)}
+          className="fixed inset-0 z-50 bg-black/92 flex items-center justify-center p-4 select-none"
+          onClick={closeLightbox}
+          onTouchStart={(e) => {
+            touchStartXRef.current = e.touches[0]?.clientX ?? null;
+          }}
+          onTouchEnd={(e) => {
+            if (touchStartXRef.current === null) return;
+            const endX = e.changedTouches[0]?.clientX ?? touchStartXRef.current;
+            const deltaX = endX - touchStartXRef.current;
+            touchStartXRef.current = null;
+            if (Math.abs(deltaX) > 45) {
+              if (deltaX > 0) showPrevPortrait();
+              else showNextPortrait();
+            }
+          }}
         >
-          <button
-            type="button"
-            onClick={() => setLightboxUrl(null)}
-            className="absolute top-6 right-6 text-white"
+          {/* Top Counter & Close Button */}
+          <div
+            className="absolute top-5 inset-x-5 flex items-center justify-between text-white z-10"
+            onClick={(e) => e.stopPropagation()}
           >
-            <X className="w-8 h-8" />
-          </button>
+            <span className="rounded-full bg-white/15 px-3.5 py-1 text-xs font-medium backdrop-blur-sm">
+              {lightboxIndex + 1} / {allPortraits.length}
+            </span>
+            <button
+              type="button"
+              onClick={closeLightbox}
+              aria-label="Close portrait preview"
+              className="rounded-full bg-white/15 p-2 text-white hover:bg-white/25 transition"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+
+          {/* Previous Button */}
+          {allPortraits.length > 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                showPrevPortrait();
+              }}
+              aria-label="Previous portrait"
+              className="absolute left-3 sm:left-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
+            >
+              <ChevronLeft className="w-6 h-6 sm:w-7 sm:h-7" />
+            </button>
+          )}
+
+          {/* Active Portrait */}
           <img
-            src={lightboxUrl}
-            alt="Pre-wedding memory"
-            className="max-h-[85vh] max-w-full rounded-xl"
+            src={activeLightboxUrl}
+            alt={`Pre-wedding portrait ${lightboxIndex + 1}`}
+            onClick={(e) => e.stopPropagation()}
+            className="max-h-[82vh] max-w-[85vw] rounded-xl object-contain shadow-2xl"
           />
+
+          {/* Next Button */}
+          {allPortraits.length > 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                showNextPortrait();
+              }}
+              aria-label="Next portrait"
+              className="absolute right-3 sm:right-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
+            >
+              <ChevronRight className="w-6 h-6 sm:w-7 sm:h-7" />
+            </button>
+          )}
         </div>
       )}
 

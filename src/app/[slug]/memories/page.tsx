@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, usePathname, useRouter } from 'next/navigation';
 import imageCompression from 'browser-image-compression';
 import { supabase, Wedding, GuestPhoto } from '@/lib/supabase';
@@ -12,6 +12,8 @@ import { useFeedback } from '@/components/FeedbackProvider';
 import {
   ArrowLeft,
   Camera,
+  ChevronLeft,
+  ChevronRight,
   Heart,
   Loader2,
   Lock,
@@ -37,7 +39,7 @@ function WeddingMemoriesContent() {
   const [loading, setLoading] = useState(true);
   const [refreshingGallery, setRefreshingGallery] = useState(false);
   const [activeTag, setActiveTag] = useState('All');
-  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [isUploadLocked, setIsUploadLocked] = useState(false);
   const [introPromptIndex, setIntroPromptIndex] = useState(0);
   const [navigatingBack, setNavigatingBack] = useState(false);
@@ -48,6 +50,14 @@ function WeddingMemoriesContent() {
   const [momentTag, setMomentTag] = useState('Reception');
   const [files, setFiles] = useState<FileList | null>(null);
   const [uploading, setUploading] = useState(false);
+
+  // Refs for back-button guard & touch swipe
+  const lightboxOpenRef = useRef(false);
+  const touchStartXRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    lightboxOpenRef.current = lightboxIndex !== null;
+  }, [lightboxIndex]);
 
   useEffect(() => {
     setNavigatingBack(false);
@@ -109,12 +119,77 @@ function WeddingMemoriesContent() {
     }
   }, [loading]);
 
+  const filteredPhotos =
+    activeTag === 'All' ? photos : photos.filter((p) => p.moment_tag === activeTag);
+
+  const openLightbox = useCallback((index: number) => {
+    setLightboxIndex(index);
+    if (typeof window !== 'undefined' && !window.history.state?.oneheartsMemoriesLightbox) {
+      window.history.pushState({ ...window.history.state, oneheartsMemoriesLightbox: true }, '');
+    }
+  }, []);
+
+  const closeLightbox = useCallback(() => {
+    setLightboxIndex(null);
+    if (typeof window !== 'undefined' && window.history.state?.oneheartsMemoriesLightbox) {
+      window.history.back();
+    }
+  }, []);
+
+  const showPrevPhoto = useCallback(() => {
+    if (filteredPhotos.length === 0) return;
+    setLightboxIndex((prev) =>
+      prev === null ? 0 : (prev - 1 + filteredPhotos.length) % filteredPhotos.length
+    );
+  }, [filteredPhotos.length]);
+
+  const showNextPhoto = useCallback(() => {
+    if (filteredPhotos.length === 0) return;
+    setLightboxIndex((prev) => (prev === null ? 0 : (prev + 1) % filteredPhotos.length));
+  }, [filteredPhotos.length]);
+
+  // Keyboard navigation when lightbox is open
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'ArrowLeft') showPrevPhoto();
+      if (e.key === 'ArrowRight') showNextPhoto();
+      if (e.key === 'Escape') closeLightbox();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [lightboxIndex, showPrevPhoto, showNextPhoto, closeLightbox]);
+
+  // Device Back button: close lightbox first, or route safely back to the wedding invitation
+  useEffect(() => {
+    if (typeof window === 'undefined' || !wedding) return;
+
+    window.history.replaceState({ ...window.history.state, oneheartsMemoriesBase: true }, '');
+    window.history.pushState({ ...window.history.state, oneheartsMemoriesGuard: true }, '');
+
+    function handlePopState() {
+      if (lightboxOpenRef.current) {
+        setLightboxIndex(null);
+        return;
+      }
+
+      // Route back to the wedding invitation instead of leaving the site
+      router.push(`/${wedding!.slug}`);
+    }
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [wedding, router]);
+
   if (loading) return <LoadingScreen />;
   if (!wedding) return <div className="p-12 text-center">Wedding celebration not found.</div>;
 
   const theme = THEME_PRESETS[wedding.theme_preset] || THEME_PRESETS.champagne;
   const isDark = wedding.theme_preset === 'midnight';
   const brandColor = getWeddingBrandColor(wedding);
+
+  const activeLightboxPhoto =
+    lightboxIndex !== null && filteredPhotos[lightboxIndex] ? filteredPhotos[lightboxIndex] : null;
 
   async function handleRefreshGallery() {
     if (!wedding || refreshingGallery) return;
@@ -225,9 +300,6 @@ function WeddingMemoriesContent() {
     );
     await supabase.from('guest_photos').update({ likes_count: updatedCount }).eq('id', photo.id);
   }
-
-  const filteredPhotos =
-    activeTag === 'All' ? photos : photos.filter((p) => p.moment_tag === activeTag);
 
   return (
     <div className={`min-h-screen flex flex-col ${theme.bg} ${theme.text}`}>
@@ -407,7 +479,10 @@ function WeddingMemoriesContent() {
                 return (
                   <button
                     key={tag}
-                    onClick={() => setActiveTag(tag)}
+                    onClick={() => {
+                      setActiveTag(tag);
+                      setLightboxIndex(null);
+                    }}
                     style={
                       isActive
                         ? { backgroundColor: brandColor, borderColor: brandColor, color: '#FFFFFF' }
@@ -436,7 +511,7 @@ function WeddingMemoriesContent() {
             </div>
           ) : (
             <div className="columns-1 sm:columns-2 lg:columns-3 gap-4 space-y-4">
-              {filteredPhotos.map((photo) => (
+              {filteredPhotos.map((photo, idx) => (
                 <div
                   key={photo.id}
                   className={`break-inside-avoid rounded-2xl overflow-hidden border ${theme.border} ${theme.surface}`}
@@ -444,7 +519,7 @@ function WeddingMemoriesContent() {
                   <img
                     src={photo.image_url}
                     alt={photo.caption || 'Wedding memory'}
-                    onClick={() => setLightboxUrl(photo.image_url)}
+                    onClick={() => openLightbox(idx)}
                     className="w-full cursor-pointer hover:opacity-95 transition"
                   />
                   <div className="p-4 flex items-center justify-between">
@@ -475,24 +550,96 @@ function WeddingMemoriesContent() {
         </section>
       </main>
 
-      {/* Lightbox Modal */}
-      {lightboxUrl && (
+      {/* Fullscreen Lightbox Modal with Previous / Next Controls & Swipe */}
+      {activeLightboxPhoto && lightboxIndex !== null && (
         <div
-          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4"
-          onClick={() => setLightboxUrl(null)}
+          className="fixed inset-0 z-50 bg-black/92 flex flex-col items-center justify-center p-4 select-none"
+          onClick={closeLightbox}
+          onTouchStart={(e) => {
+            touchStartXRef.current = e.touches[0]?.clientX ?? null;
+          }}
+          onTouchEnd={(e) => {
+            if (touchStartXRef.current === null) return;
+            const endX = e.changedTouches[0]?.clientX ?? touchStartXRef.current;
+            const deltaX = endX - touchStartXRef.current;
+            touchStartXRef.current = null;
+            if (Math.abs(deltaX) > 45) {
+              if (deltaX > 0) showPrevPhoto();
+              else showNextPhoto();
+            }
+          }}
         >
-          <button
-            type="button"
-            onClick={() => setLightboxUrl(null)}
-            className="absolute top-6 right-6 text-white"
+          {/* Top Counter & Close Button */}
+          <div
+            className="absolute top-5 inset-x-5 flex items-center justify-between text-white z-10"
+            onClick={(e) => e.stopPropagation()}
           >
-            <X className="w-8 h-8" />
-          </button>
+            <span className="rounded-full bg-white/15 px-3.5 py-1 text-xs font-medium backdrop-blur-sm">
+              {lightboxIndex + 1} / {filteredPhotos.length}
+            </span>
+            <button
+              type="button"
+              onClick={closeLightbox}
+              aria-label="Close photo preview"
+              className="rounded-full bg-white/15 p-2 text-white hover:bg-white/25 transition"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+
+          {/* Previous Button */}
+          {filteredPhotos.length > 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                showPrevPhoto();
+              }}
+              aria-label="Previous photo"
+              className="absolute left-3 sm:left-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
+            >
+              <ChevronLeft className="w-6 h-6 sm:w-7 sm:h-7" />
+            </button>
+          )}
+
+          {/* Active Photo */}
           <img
-            src={lightboxUrl}
-            alt="Full screen memory"
-            className="max-h-[85vh] max-w-full rounded-xl"
+            src={activeLightboxPhoto.image_url}
+            alt={activeLightboxPhoto.caption || 'Full screen memory'}
+            onClick={(e) => e.stopPropagation()}
+            className="max-h-[78vh] max-w-[85vw] rounded-xl object-contain shadow-2xl"
           />
+
+          {/* Photo Attribution & Caption Bar */}
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="mt-4 max-w-md text-center text-white px-4"
+          >
+            <p className="text-sm font-semibold">
+              {activeLightboxPhoto.guest_name}{' '}
+              <span className="text-xs font-normal text-white/70">
+                &bull; {activeLightboxPhoto.moment_tag}
+              </span>
+            </p>
+            {activeLightboxPhoto.caption && (
+              <p className="text-xs text-white/80 mt-1">{activeLightboxPhoto.caption}</p>
+            )}
+          </div>
+
+          {/* Next Button */}
+          {filteredPhotos.length > 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                showNextPhoto();
+              }}
+              aria-label="Next photo"
+              className="absolute right-3 sm:right-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
+            >
+              <ChevronRight className="w-6 h-6 sm:w-7 sm:h-7" />
+            </button>
+          )}
         </div>
       )}
 
