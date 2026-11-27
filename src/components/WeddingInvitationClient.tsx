@@ -22,6 +22,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Heart,
+  Play,
 } from 'lucide-react';
 
 type WeddingPhase = 'upcoming' | 'live' | 'completed';
@@ -33,6 +34,10 @@ function getWeddingPhase(weddingDateIso: string, nowMs: number): WeddingPhase {
   if (nowMs < startMs) return 'upcoming';
   if (nowMs <= startMs + eighteenHoursMs) return 'live';
   return 'completed';
+}
+
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|mov|webm|m4v)(\?|#|$)/i.test(url);
 }
 
 export function WeddingInvitationClient() {
@@ -148,7 +153,7 @@ export function WeddingInvitationClient() {
     window.history.pushState({ ...window.history.state, oneheartsGuard: true }, '');
 
     function handlePopState() {
-      // 1. If the photo lightbox is open, close it and stay on the page
+      // 1. If the photo/video lightbox is open, close it and stay on the page
       if (lightboxOpenRef.current) {
         setLightboxIndex(null);
         return;
@@ -426,11 +431,28 @@ export function WeddingInvitationClient() {
                     isCenterCard ? 'sm:-translate-y-3 shadow-md' : ''
                   }`}
                 >
-                  <img
-                    src={url}
-                    alt={`${wedding.partner1_name} & ${wedding.partner2_name} featured portrait ${idx + 1}`}
-                    className="h-full w-full object-cover group-hover:scale-105 transition duration-500"
-                  />
+                  {isVideoUrl(url) ? (
+                    <div className="relative h-full w-full bg-black">
+                      <video
+                        src={url}
+                        muted
+                        loop
+                        autoPlay
+                        playsInline
+                        preload="metadata"
+                        className="h-full w-full object-cover"
+                      />
+                      <span className="absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 rounded-full bg-black/65 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-white backdrop-blur-sm">
+                        <Play className="h-3 w-3 fill-white" /> Video
+                      </span>
+                    </div>
+                  ) : (
+                    <img
+                      src={url}
+                      alt={`${wedding.partner1_name} & ${wedding.partner2_name} featured portrait ${idx + 1}`}
+                      className="h-full w-full object-cover group-hover:scale-105 transition duration-500"
+                    />
+                  )}
                   <div className="absolute inset-0 bg-black/0 group-hover:bg-black/15 transition" />
                 </button>
               );
@@ -470,11 +492,28 @@ export function WeddingInvitationClient() {
                 onClick={() => openLightbox(idx)}
                 className={`group relative aspect-[4/5] rounded-2xl overflow-hidden border ${theme.border} cursor-pointer shadow-sm`}
               >
-                <img
-                  src={url}
-                  alt={`${wedding.partner1_name} & ${wedding.partner2_name} pre-wedding portrait ${idx + 1}`}
-                  className="h-full w-full object-cover group-hover:scale-105 transition duration-500"
-                />
+                {isVideoUrl(url) ? (
+                  <div className="relative h-full w-full bg-black">
+                    <video
+                      src={url}
+                      muted
+                      loop
+                      autoPlay
+                      playsInline
+                      preload="metadata"
+                      className="h-full w-full object-cover"
+                    />
+                    <span className="absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 rounded-full bg-black/65 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-white backdrop-blur-sm">
+                      <Play className="h-3 w-3 fill-white" /> Video
+                    </span>
+                  </div>
+                ) : (
+                  <img
+                    src={url}
+                    alt={`${wedding.partner1_name} & ${wedding.partner2_name} pre-wedding portrait ${idx + 1}`}
+                    className="h-full w-full object-cover group-hover:scale-105 transition duration-500"
+                  />
+                )}
                 <div className="absolute inset-0 bg-black/0 group-hover:bg-black/15 transition" />
               </div>
             ))}
@@ -664,7 +703,7 @@ export function WeddingInvitationClient() {
             <button
               type="button"
               onClick={closeLightbox}
-              aria-label="Close portrait preview"
+              aria-label="Close media preview"
               className="rounded-full bg-white/15 p-2 text-white hover:bg-white/25 transition"
             >
               <X className="w-6 h-6" />
@@ -679,20 +718,32 @@ export function WeddingInvitationClient() {
                 e.stopPropagation();
                 showPrevPortrait();
               }}
-              aria-label="Previous portrait"
+              aria-label="Previous item"
               className="absolute left-3 sm:left-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
             >
               <ChevronLeft className="w-6 h-6 sm:w-7 sm:h-7" />
             </button>
           )}
 
-          {/* Active Portrait */}
-          <img
-            src={activeLightboxUrl}
-            alt={`Pre-wedding portrait ${lightboxIndex + 1}`}
-            onClick={(e) => e.stopPropagation()}
-            className="max-h-[82vh] max-w-[85vw] rounded-xl object-contain shadow-2xl"
-          />
+          {/* Active Portrait or Video */}
+          {isVideoUrl(activeLightboxUrl) ? (
+            <video
+              key={activeLightboxUrl}
+              src={activeLightboxUrl}
+              controls
+              autoPlay
+              playsInline
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-[82vh] max-w-[85vw] rounded-xl bg-black shadow-2xl"
+            />
+          ) : (
+            <img
+              src={activeLightboxUrl}
+              alt={`Pre-wedding portrait ${lightboxIndex + 1}`}
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-[82vh] max-w-[85vw] rounded-xl object-contain shadow-2xl"
+            />
+          )}
 
           {/* Next Button */}
           {allPortraits.length > 1 && (
@@ -702,7 +753,7 @@ export function WeddingInvitationClient() {
                 e.stopPropagation();
                 showNextPortrait();
               }}
-              aria-label="Next portrait"
+              aria-label="Next item"
               className="absolute right-3 sm:right-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
             >
               <ChevronRight className="w-6 h-6 sm:w-7 sm:h-7" />

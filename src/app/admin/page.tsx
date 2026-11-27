@@ -1,5 +1,6 @@
 'use client';
 
+import { upload } from '@upstash/blob/browser';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import JSZip from 'jszip';
@@ -31,6 +32,10 @@ function toLocalDateTimeInput(isoString: string): string {
   if (isNaN(date.getTime())) return '';
   const offsetMs = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|mov|webm|m4v)(\?|#|$)/i.test(url);
 }
 
 function getMediaExtension(photo: GuestPhoto, blobType: string): string {
@@ -372,32 +377,60 @@ export default function AdminStudioPage() {
       const newUrls: string[] = [];
 
       for (const file of Array.from(fileList)) {
-        const compressed = await imageCompression(file, {
-          maxSizeMB: 0.85,
-          maxWidthOrHeight: 1800,
-          useWebWorker: true,
-        });
+        const isVideo = file.type.startsWith('video/');
 
-        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');
-        const filePath = `pre-wedding/${selectedWedding.id}/${Date.now()}-${cleanName}`;
+        if (isVideo) {
+  if (file.size > 25 * 1024 * 1024) {
+    notify({
+      title: `${file.name} is too large`,
+      description: 'Pre-wedding videos must be 25 MB or smaller.',
+      variant: 'error',
+    });
+    continue;
+  }
 
-        const { error: uploadErr } = await supabase.storage
-          .from('wedding-memories')
-          .upload(filePath, compressed, { upsert: true });
-
-        if (uploadErr) {
-          notify({
-            title: `Failed to upload ${file.name}`,
-            description: uploadErr.message,
-            variant: 'error',
+  try {
+    const task = upload(file, {
+      route: '/api/upload-video',
+      input: { weddingId: selectedWedding.id },
+    });
+    const blob = await task.done;
+    newUrls.push(blob.url);
+  } catch (err) {
+    notify({
+      title: `Failed to upload ${file.name}`,
+      description: err instanceof Error ? err.message : 'Video upload error.',
+      variant: 'error',
+    });
+          }
+        } else {
+          const compressed = await imageCompression(file, {
+            maxSizeMB: 0.85,
+            maxWidthOrHeight: 1800,
+            useWebWorker: true,
           });
-          continue;
-        }
 
-        const { data: publicUrlData } = supabase.storage
-          .from('wedding-memories')
-          .getPublicUrl(filePath);
-        newUrls.push(publicUrlData.publicUrl);
+          const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');
+          const filePath = `pre-wedding/${selectedWedding.id}/${Date.now()}-${cleanName}`;
+
+          const { error: uploadErr } = await supabase.storage
+            .from('wedding-memories')
+            .upload(filePath, compressed, { upsert: true });
+
+          if (uploadErr) {
+            notify({
+              title: `Failed to upload ${file.name}`,
+              description: uploadErr.message,
+              variant: 'error',
+            });
+            continue;
+          }
+
+          const { data: publicUrlData } = supabase.storage
+            .from('wedding-memories')
+            .getPublicUrl(filePath);
+          newUrls.push(publicUrlData.publicUrl);
+        }
       }
 
       if (newUrls.length > 0) {
@@ -422,7 +455,7 @@ export default function AdminStudioPage() {
           );
         }
         notify({
-          title: `${newUrls.length} pre-wedding portrait(s) uploaded`,
+          title: `${newUrls.length} pre-wedding item(s) uploaded`,
           variant: 'success',
         });
       }
@@ -455,7 +488,7 @@ export default function AdminStudioPage() {
         prev.map((w) => (w.id === updatedWedding.id ? updatedWedding : w))
       );
     }
-    notify({ title: 'Pre-wedding photo removed', variant: 'info' });
+    notify({ title: 'Pre-wedding item removed', variant: 'info' });
   }
 
   async function handleSaveConfig(e: React.FormEvent) {
@@ -927,7 +960,7 @@ export default function AdminStudioPage() {
                 />
               </div>
 
-              {/* Multi-Photo Pre-Wedding Shoot Gallery Uploader */}
+              {/* Multi-Media Pre-Wedding Shoot Gallery Uploader */}
               <div className="space-y-3 pt-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -935,16 +968,16 @@ export default function AdminStudioPage() {
                       Pre-Wedding Shoot Gallery ({(selectedWedding.pre_wedding_photos || []).length})
                     </label>
                     <p className="text-[11px] text-[#7A6F67]">
-                      Upload engagement or pre-wedding portraits to showcase on the couple&apos;s public page.
+                      Upload engagement or pre-wedding portraits and videos (MP4/MOV/WebM, up to 25 MB) to showcase on the couple&apos;s public page.
                     </p>
                   </div>
 
                   <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-[#B8925A] px-4 py-2 text-xs font-semibold text-[#B8925A] hover:bg-[#B8925A]/10 transition">
                     <Upload className="w-3.5 h-3.5" />
-                    {uploadingPreWedding ? 'Uploading Portraits...' : 'Add Pre-Wedding Photos'}
+                    {uploadingPreWedding ? 'Uploading Media...' : 'Add Photos & Videos'}
                     <input
                       type="file"
-                      accept="image/*"
+                      accept="image/*,video/mp4,video/quicktime,video/webm"
                       multiple
                       disabled={uploadingPreWedding}
                       onChange={handlePreWeddingUpload}
@@ -960,15 +993,25 @@ export default function AdminStudioPage() {
                         key={idx}
                         className="group relative aspect-[4/5] rounded-xl overflow-hidden border border-[#E8DFD3] bg-white"
                       >
-                        <img
-                          src={photoUrl}
-                          alt={`Pre-wedding portrait ${idx + 1}`}
-                          className="h-full w-full object-cover"
-                        />
+                        {isVideoUrl(photoUrl) ? (
+                          <video
+                            src={photoUrl}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            className="h-full w-full bg-black object-cover"
+                          />
+                        ) : (
+                          <img
+                            src={photoUrl}
+                            alt={`Pre-wedding portrait ${idx + 1}`}
+                            className="h-full w-full object-cover"
+                          />
+                        )}
                         <button
                           type="button"
                           onClick={() => handleRemovePreWeddingPhoto(photoUrl)}
-                          aria-label="Remove pre-wedding photo"
+                          aria-label="Remove pre-wedding item"
                           className="absolute top-1.5 right-1.5 rounded-full bg-black/70 p-1.5 text-white opacity-90 hover:bg-rose-600 transition"
                         >
                           <Trash2 className="w-3 h-3" />

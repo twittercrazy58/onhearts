@@ -1,5 +1,6 @@
 'use client';
 
+import { upload } from '@upstash/blob/browser';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import JSZip from 'jszip';
@@ -43,6 +44,10 @@ function toLocalDateTimeInput(isoString: string): string {
   if (isNaN(date.getTime())) return '';
   const offsetMs = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|mov|webm|m4v)(\?|#|$)/i.test(url);
 }
 
 function getMediaExtension(photo: GuestPhoto, blobType: string): string {
@@ -284,18 +289,53 @@ export default function CoupleBackroomPage() {
     try {
       const newUrls: string[] = [];
       for (const file of Array.from(fileList)) {
-        const compressed = await imageCompression(file, {
-          maxSizeMB: 0.85,
-          maxWidthOrHeight: 1800,
-          useWebWorker: true,
-        });
-        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');
-        const filePath = `pre-wedding/${wedding.id}/${Date.now()}-${cleanName}`;
-        const { error } = await supabase.storage
-          .from('wedding-memories')
-          .upload(filePath, compressed, { upsert: true });
+        const isVideo = file.type.startsWith('video/');
 
-        if (!error) {
+        if (isVideo) {
+          if (file.size > 25 * 1024 * 1024) {
+            notify({
+              title: `${file.name} is too large`,
+              description: 'Pre-wedding videos must be 25 MB or smaller.',
+              variant: 'error',
+            });
+            continue;
+          }
+
+          try {
+            const task = upload(file, {
+              route: '/api/upload-video',
+              input: { weddingId: wedding.id },
+            });
+            const blob = await task.done;
+            newUrls.push(blob.url);
+          } catch (err) {
+            notify({
+              title: `Failed to upload ${file.name}`,
+              description: err instanceof Error ? err.message : 'Video upload error.',
+              variant: 'error',
+            });
+          }
+        } else {
+          const compressed = await imageCompression(file, {
+            maxSizeMB: 0.85,
+            maxWidthOrHeight: 1800,
+            useWebWorker: true,
+          });
+          const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');
+          const filePath = `pre-wedding/${wedding.id}/${Date.now()}-${cleanName}`;
+          const { error } = await supabase.storage
+            .from('wedding-memories')
+            .upload(filePath, compressed, { upsert: true });
+
+          if (error) {
+            notify({
+              title: `Failed to upload ${file.name}`,
+              description: error.message,
+              variant: 'error',
+            });
+            continue;
+          }
+
           const { data } = supabase.storage.from('wedding-memories').getPublicUrl(filePath);
           newUrls.push(data.publicUrl);
         }
@@ -319,7 +359,7 @@ export default function CoupleBackroomPage() {
           );
         }
         notify({
-          title: `${newUrls.length} portrait(s) added`,
+          title: `${newUrls.length} pre-wedding item(s) added`,
           description: 'Your Pre-Wedding Gallery has been updated.',
           variant: 'success',
         });
@@ -349,7 +389,7 @@ export default function CoupleBackroomPage() {
         prev ? { ...updatedWedding, ...getDirtyOverrides(prev) } : updatedWedding
       );
     }
-    notify({ title: 'Portrait removed', variant: 'info' });
+    notify({ title: 'Item removed', variant: 'info' });
   }
 
   async function handleSave(e: React.FormEvent) {
@@ -775,10 +815,10 @@ export default function CoupleBackroomPage() {
                   className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-4 py-1.5 text-xs font-semibold hover:opacity-80"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  {uploadingPreWedding ? 'Uploading...' : 'Add Pre-Wedding Photos'}
+                  {uploadingPreWedding ? 'Uploading...' : 'Add Photos & Videos'}
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/*,video/mp4,video/quicktime,video/webm"
                     multiple
                     disabled={uploadingPreWedding}
                     onChange={handlePreWeddingUpload}
@@ -794,11 +834,21 @@ export default function CoupleBackroomPage() {
                       key={idx}
                       className="relative aspect-[4/5] rounded-xl overflow-hidden border border-[#E8DFD3] bg-white"
                     >
-                      <img
-                        src={photoUrl}
-                        alt={`Pre-wedding ${idx + 1}`}
-                        className="h-full w-full object-cover"
-                      />
+                      {isVideoUrl(photoUrl) ? (
+                        <video
+                          src={photoUrl}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          className="h-full w-full bg-black object-cover"
+                        />
+                      ) : (
+                        <img
+                          src={photoUrl}
+                          alt={`Pre-wedding ${idx + 1}`}
+                          className="h-full w-full object-cover"
+                        />
+                      )}
                       <button
                         type="button"
                         onClick={() => handleRemovePreWeddingPhoto(photoUrl)}

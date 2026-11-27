@@ -1,5 +1,6 @@
 'use client';
 
+import { upload } from '@upstash/blob/browser';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, usePathname, useRouter } from 'next/navigation';
 import imageCompression from 'browser-image-compression';
@@ -230,27 +231,22 @@ function WeddingMemoriesContent() {
     continue;
   }
 
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('weddingId', wedding.id);
-
-  const res = await fetch('/api/upload-video', {
-    method: 'POST',
-    body: formData,
-  });
-  const data = await res.json();
-
-  if (!res.ok || !data.url) {
+  try {
+    const task = upload(file, {
+      route: '/api/upload-video',
+      input: { weddingId: wedding.id },
+    });
+    const blob = await task.done;
+    finalPublicUrl = blob.url;
+  } catch (err) {
     notify({
       title: 'Video upload error',
-      description: data.error || 'Could not upload video.',
-              variant: 'error',
-            });
-            continue;
-          }
-
-          finalPublicUrl = data.url;
-        } else {
+      description: err instanceof Error ? err.message : 'Could not upload video.',
+      variant: 'error',
+    });
+    continue;
+            }
+      } else {
           const compressed = await imageCompression(file, {
             maxSizeMB: 0.35,
             maxWidthOrHeight: 1440,
