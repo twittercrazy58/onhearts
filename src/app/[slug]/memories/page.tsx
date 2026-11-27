@@ -23,9 +23,9 @@ import {
 } from 'lucide-react';
 
 const MEMORIES_INTRO_PROMPTS = [
-  'Took photos of the couple and guests today? Tap below to upload them straight into our live wedding album—no app download needed.',
-  'Share the wedding photos you snapped on your phone! Upload them below so the couple and everyone here can see them live.',
-  'Help us collect every moment from today. Enter your name below, select your photos from your phone gallery, and tap upload to add them to our wedding gallery.',
+  'Took photos or videos of the couple and guests today? Tap below to upload them straight into our live wedding album—no app download needed.',
+  'Share the wedding moments you snapped on your phone! Upload photos or short video clips below so the couple and everyone here can see them live.',
+  'Help us collect every moment from today. Enter your name below, select your photos or short videos from your phone gallery, and tap upload to add them to our wedding gallery.',
 ];
 
 function WeddingMemoriesContent() {
@@ -198,7 +198,7 @@ function WeddingMemoriesContent() {
       await fetchApprovedPhotos(wedding.id);
       notify({
         title: 'Gallery updated',
-        description: 'Fetched the latest shared photos.',
+        description: 'Fetched the latest shared memories.',
         variant: 'info',
       });
     } finally {
@@ -217,34 +217,70 @@ function WeddingMemoriesContent() {
 
     try {
       for (const file of Array.from(files)) {
-        const compressed = await imageCompression(file, {
-          maxSizeMB: 0.35,
-          maxWidthOrHeight: 1440,
-          initialQuality: 0.8,
-          useWebWorker: true,
-        });
-        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');
-        const filePath = `${wedding.id}/${Date.now()}-${cleanName}`;
+        const isVideo = file.type.startsWith('video/');
+        let finalPublicUrl = '';
 
-        const { error: uploadErr } = await supabase.storage
-          .from('wedding-memories')
-          .upload(filePath, compressed, {
-            contentType: compressed.type || 'image/jpeg',
-            upsert: false,
-          });
+        if (isVideo) {
+  if (file.size > 25 * 1024 * 1024) {
+    notify({
+      title: 'Video too large',
+      description: `${file.name} exceeds 25 MB. Please trim it to a shorter clip.`,
+      variant: 'error',
+    });
+    continue;
+  }
 
-        if (uploadErr) {
-          notify({
-            title: 'Storage upload error',
-            description: uploadErr.message,
-            variant: 'error',
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('weddingId', wedding.id);
+
+  const res = await fetch('/api/upload-video', {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await res.json();
+
+  if (!res.ok || !data.url) {
+    notify({
+      title: 'Video upload error',
+      description: data.error || 'Could not upload video.',
+              variant: 'error',
+            });
+            continue;
+          }
+
+          finalPublicUrl = data.url;
+        } else {
+          const compressed = await imageCompression(file, {
+            maxSizeMB: 0.35,
+            maxWidthOrHeight: 1440,
+            initialQuality: 0.8,
+            useWebWorker: true,
           });
-          continue;
+          const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');
+          const filePath = `${wedding.id}/${Date.now()}-${cleanName}`;
+
+          const { error: uploadErr } = await supabase.storage
+            .from('wedding-memories')
+            .upload(filePath, compressed, {
+              contentType: compressed.type || 'image/jpeg',
+              upsert: false,
+            });
+
+          if (uploadErr) {
+            notify({
+              title: 'Storage upload error',
+              description: uploadErr.message,
+              variant: 'error',
+            });
+            continue;
+          }
+
+          const { data: publicUrlData } = supabase.storage
+            .from('wedding-memories')
+            .getPublicUrl(filePath);
+          finalPublicUrl = publicUrlData.publicUrl;
         }
-
-        const { data: publicUrlData } = supabase.storage
-          .from('wedding-memories')
-          .getPublicUrl(filePath);
 
         const { data: inserted, error: insertErr } = await supabase
           .from('guest_photos')
@@ -253,7 +289,8 @@ function WeddingMemoriesContent() {
             guest_name: guestName,
             caption,
             moment_tag: momentTag,
-            image_url: publicUrlData.publicUrl,
+            image_url: finalPublicUrl,
+            media_type: isVideo ? 'video' : 'image',
             is_approved: !wedding.require_photo_approval,
           })
           .select()
@@ -278,10 +315,10 @@ function WeddingMemoriesContent() {
 
       if (uploadedCount > 0) {
         notify({
-          title: wedding.require_photo_approval ? 'Submitted for review!' : 'Photos are live!',
+          title: wedding.require_photo_approval ? 'Submitted for review!' : 'Memories are live!',
           description: wedding.require_photo_approval
-            ? `${uploadedCount} photo(s) will appear once approved by the couple.`
-            : `${uploadedCount} photo(s) uploaded to the live gallery.`,
+            ? `${uploadedCount} item(s) will appear once approved by the couple.`
+            : `${uploadedCount} item(s) uploaded to the live gallery.`,
           variant: 'success',
         });
         setCaption('');
@@ -348,7 +385,7 @@ function WeddingMemoriesContent() {
           </p>
         </header>
 
-        {/* Guest Photo Upload Section */}
+        {/* Guest Photo & Video Upload Section */}
         <section id="upload" className="max-w-2xl mx-auto px-4 py-8">
           {isUploadLocked ? (
             <div
@@ -364,7 +401,7 @@ function WeddingMemoriesContent() {
                 Live Camera Opens at Ceremony Time
               </h2>
               <p className={`mt-3 text-sm sm:text-base max-w-md mx-auto ${theme.muted}`}>
-                Guest photo uploads are currently locked until{' '}
+                Guest uploads are currently locked until{' '}
                 <span className="font-semibold">
                   {new Date(wedding.wedding_date).toLocaleString('en-US', {
                     month: 'long',
@@ -385,7 +422,7 @@ function WeddingMemoriesContent() {
               <div className="flex items-center gap-3 mb-4">
                 <Camera style={{ color: brandColor }} className="w-6 h-6" />
                 <h2 className="font-serif text-2xl sm:text-3xl font-semibold">
-                  Upload Your Photos
+                  Upload Photos &amp; Videos
                 </h2>
               </div>
               <div className="space-y-4">
@@ -418,11 +455,11 @@ function WeddingMemoriesContent() {
                 </div>
                 <div>
                   <label className="block text-xs font-medium mb-1.5 opacity-80">
-                    Step 2: Choose one or more photos from your phone
+                    Step 2: Choose photos or short video clips (max 25 MB per video)
                   </label>
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/*,video/mp4,video/quicktime,video/webm"
                     multiple
                     required
                     onChange={(e) => setFiles(e.target.files)}
@@ -437,8 +474,7 @@ function WeddingMemoriesContent() {
                 >
                   {uploading ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" /> Compressing &amp; Uploading
-                      Photos...
+                      <Loader2 className="w-4 h-4 animate-spin" /> Uploading Memories...
                     </>
                   ) : (
                     <>
@@ -451,7 +487,7 @@ function WeddingMemoriesContent() {
           )}
         </section>
 
-        {/* Live Photo Gallery */}
+        {/* Live Photo & Video Gallery */}
         <section id="gallery" className="max-w-6xl mx-auto px-4 py-12 scroll-mt-20">
           <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
             <div className="flex items-center gap-3">
@@ -463,7 +499,7 @@ function WeddingMemoriesContent() {
                 onClick={handleRefreshGallery}
                 disabled={refreshingGallery}
                 style={{ borderColor: `${brandColor}60`, color: brandColor }}
-                aria-label="Refresh gallery photos"
+                aria-label="Refresh gallery memories"
                 className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold hover:opacity-80 active:scale-95 transition disabled:opacity-60"
               >
                 <RefreshCw
@@ -502,10 +538,10 @@ function WeddingMemoriesContent() {
           {filteredPhotos.length === 0 ? (
             <div className={`rounded-3xl border ${theme.border} ${theme.surface} p-12 text-center`}>
               <Camera style={{ color: brandColor }} className="w-8 h-8 mx-auto mb-3 opacity-60" />
-              <p className="font-serif text-xl font-semibold">No Photos Shared Yet</p>
+              <p className="font-serif text-xl font-semibold">No Memories Shared Yet</p>
               <p className={`text-xs mt-1 ${theme.muted}`}>
                 {isUploadLocked
-                  ? 'Photos uploaded by guests when the celebration begins will appear right here.'
+                  ? 'Photos and videos uploaded by guests when the celebration begins will appear right here.'
                   : 'Be the first to capture and share a moment from the celebration!'}
               </p>
             </div>
@@ -516,12 +552,22 @@ function WeddingMemoriesContent() {
                   key={photo.id}
                   className={`break-inside-avoid rounded-2xl overflow-hidden border ${theme.border} ${theme.surface}`}
                 >
-                  <img
-                    src={photo.image_url}
-                    alt={photo.caption || 'Wedding memory'}
-                    onClick={() => openLightbox(idx)}
-                    className="w-full cursor-pointer hover:opacity-95 transition"
-                  />
+                  {photo.media_type === 'video' ? (
+                    <video
+                      src={photo.image_url}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      className="w-full max-h-[460px] bg-black object-contain"
+                    />
+                  ) : (
+                    <img
+                      src={photo.image_url}
+                      alt={photo.caption || 'Wedding memory'}
+                      onClick={() => openLightbox(idx)}
+                      className="w-full cursor-pointer hover:opacity-95 transition"
+                    />
+                  )}
                   <div className="p-4 flex items-center justify-between">
                     <div>
                       <div className="flex items-center gap-2">
@@ -580,7 +626,7 @@ function WeddingMemoriesContent() {
             <button
               type="button"
               onClick={closeLightbox}
-              aria-label="Close photo preview"
+              aria-label="Close memory preview"
               className="rounded-full bg-white/15 p-2 text-white hover:bg-white/25 transition"
             >
               <X className="w-6 h-6" />
@@ -595,22 +641,33 @@ function WeddingMemoriesContent() {
                 e.stopPropagation();
                 showPrevPhoto();
               }}
-              aria-label="Previous photo"
+              aria-label="Previous memory"
               className="absolute left-3 sm:left-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
             >
               <ChevronLeft className="w-6 h-6 sm:w-7 sm:h-7" />
             </button>
           )}
 
-          {/* Active Photo */}
-          <img
-            src={activeLightboxPhoto.image_url}
-            alt={activeLightboxPhoto.caption || 'Full screen memory'}
-            onClick={(e) => e.stopPropagation()}
-            className="max-h-[78vh] max-w-[85vw] rounded-xl object-contain shadow-2xl"
-          />
+          {/* Active Photo or Video */}
+          {activeLightboxPhoto.media_type === 'video' ? (
+            <video
+              src={activeLightboxPhoto.image_url}
+              controls
+              autoPlay
+              playsInline
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-[78vh] max-w-[85vw] rounded-xl bg-black shadow-2xl"
+            />
+          ) : (
+            <img
+              src={activeLightboxPhoto.image_url}
+              alt={activeLightboxPhoto.caption || 'Full screen memory'}
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-[78vh] max-w-[85vw] rounded-xl object-contain shadow-2xl"
+            />
+          )}
 
-          {/* Photo Attribution & Caption Bar */}
+          {/* Attribution & Caption Bar */}
           <div
             onClick={(e) => e.stopPropagation()}
             className="mt-4 max-w-md text-center text-white px-4"
@@ -634,7 +691,7 @@ function WeddingMemoriesContent() {
                 e.stopPropagation();
                 showNextPhoto();
               }}
-              aria-label="Next photo"
+              aria-label="Next memory"
               className="absolute right-3 sm:right-6 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/30 active:scale-95 transition backdrop-blur-sm"
             >
               <ChevronRight className="w-6 h-6 sm:w-7 sm:h-7" />

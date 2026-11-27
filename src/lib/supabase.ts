@@ -41,6 +41,7 @@ export interface GuestPhoto {
   caption?: string;
   moment_tag: string;
   image_url: string;
+  media_type?: 'image' | 'video';
   likes_count: number;
   is_approved: boolean;
   created_at: string;

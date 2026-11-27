@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { QRCodeSVG } from 'qrcode.react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import imageCompression from 'browser-image-compression';
@@ -32,6 +31,19 @@ function toLocalDateTimeInput(isoString: string): string {
   if (isNaN(date.getTime())) return '';
   const offsetMs = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function getMediaExtension(photo: GuestPhoto, blobType: string): string {
+  if (photo.media_type === 'video' || blobType.startsWith('video/')) {
+    if (blobType.includes('quicktime') || photo.image_url.toLowerCase().endsWith('.mov')) {
+      return 'mov';
+    }
+    if (blobType.includes('webm') || photo.image_url.toLowerCase().endsWith('.webm')) {
+      return 'webm';
+    }
+    return 'mp4';
+  }
+  return blobType.includes('png') ? 'png' : 'jpg';
 }
 
 export default function AdminStudioPage() {
@@ -98,7 +110,7 @@ export default function AdminStudioPage() {
         if (showToast) {
           notify({
             title: 'Synced with latest updates',
-            description: 'Fetched the newest wedding details, photos, and wishes.',
+            description: 'Fetched the newest wedding details, memories, and wishes.',
             variant: 'info',
           });
         }
@@ -283,7 +295,7 @@ export default function AdminStudioPage() {
     const approved = await confirm({
       title: `Delete ${wedding.partner1_name} & ${wedding.partner2_name}'s Wedding?`,
       description:
-        'This permanently deletes the wedding page, pre-wedding portraits, guest photos, and guestbook wishes. This action cannot be undone.',
+        'This permanently deletes the wedding page, pre-wedding portraits, guest photos, videos, and guestbook wishes. This action cannot be undone.',
       confirmLabel: 'Yes, Delete Permanently',
       cancelLabel: 'Keep Wedding',
       destructive: true,
@@ -540,7 +552,7 @@ export default function AdminStudioPage() {
           try {
             const response = await fetch(photo.image_url);
             const blob = await response.blob();
-            const extension = blob.type.includes('png') ? 'png' : 'jpg';
+            const extension = getMediaExtension(photo, blob.type);
             const safeGuest = photo.guest_name.replace(/[^a-zA-Z0-9_-]/g, '_') || 'Guest';
             const safeTag = photo.moment_tag.replace(/[^a-zA-Z0-9_-]/g, '_');
             folder.file(
@@ -548,14 +560,14 @@ export default function AdminStudioPage() {
               blob
             );
           } catch (err) {
-            console.error('Failed to bundle image:', photo.image_url, err);
+            console.error('Failed to bundle media:', photo.image_url, err);
           }
         })
       );
 
       const content = await zip.generateAsync({ type: 'blob' });
-      saveAs(content, `OneHearts-${selectedWedding.slug}-Photos.zip`);
-      notify({ title: 'ZIP archive ready', description: 'Downloading all guest photos.' });
+      saveAs(content, `OneHearts-${selectedWedding.slug}-Memories.zip`);
+      notify({ title: 'ZIP archive ready', description: 'Downloading all guest photos and videos.' });
     } finally {
       setZipping(false);
     }
@@ -566,23 +578,23 @@ export default function AdminStudioPage() {
     await supabase.from('guest_photos').update({ is_approved: updated }).eq('id', photo.id);
     setPhotos((prev) => prev.map((p) => (p.id === photo.id ? { ...p, is_approved: updated } : p)));
     notify({
-      title: updated ? 'Photo approved and live' : 'Photo hidden from public gallery',
+      title: updated ? 'Memory approved and live' : 'Memory hidden from public gallery',
       variant: 'info',
     });
   }
 
   async function deletePhoto(id: string) {
     const approved = await confirm({
-      title: 'Delete Guest Photo?',
-      description: 'This photo will be permanently removed from the wedding gallery.',
-      confirmLabel: 'Delete Photo',
+      title: 'Delete Guest Memory?',
+      description: 'This photo or video will be permanently removed from the wedding gallery.',
+      confirmLabel: 'Delete Memory',
       destructive: true,
     });
     if (!approved) return;
 
     await supabase.from('guest_photos').delete().eq('id', id);
     setPhotos((prev) => prev.filter((p) => p.id !== id));
-    notify({ title: 'Guest photo deleted', variant: 'info' });
+    notify({ title: 'Guest memory deleted', variant: 'info' });
   }
 
   async function deleteWish(id: string) {
@@ -611,7 +623,6 @@ export default function AdminStudioPage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-[#2C2520]">
-
       {/* Admin Top Bar */}
       <header className="bg-white border-b border-[#E8DFD3] px-6 py-4 flex flex-wrap items-center justify-between gap-4">
         <BrandLogo size="md" />
@@ -820,20 +831,20 @@ export default function AdminStudioPage() {
                 <div>
                   <label className="text-xs font-medium">Theme Palette</label>
                   <select
-                 value={selectedWedding.theme_preset}
-                onChange={(e) =>
-                  updateField('theme_preset', e.target.value as Wedding['theme_preset'])
-                }
-                className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
-              >
-                <option value="champagne">Champagne Gold</option>
-                <option value="rose">Dusty Rose</option>
-                <option value="sage">Botanical Sage</option>
-                <option value="midnight">Midnight &amp; Gold</option>
-                <option value="emerald">Royal Emerald &amp; Gold</option>
-                <option value="burgundy">Velvet Burgundy &amp; Wine</option>
-                <option value="terracotta">Warm Terracotta &amp; Clay</option>
-              </select>
+                    value={selectedWedding.theme_preset}
+                    onChange={(e) =>
+                      updateField('theme_preset', e.target.value as Wedding['theme_preset'])
+                    }
+                    className="mt-1 w-full rounded-xl border border-[#E8DFD3] px-3 py-2 text-sm"
+                  >
+                    <option value="champagne">Champagne Gold</option>
+                    <option value="rose">Dusty Rose</option>
+                    <option value="sage">Botanical Sage</option>
+                    <option value="midnight">Midnight &amp; Gold</option>
+                    <option value="emerald">Royal Emerald &amp; Gold</option>
+                    <option value="burgundy">Velvet Burgundy &amp; Wine</option>
+                    <option value="terracotta">Warm Terracotta &amp; Clay</option>
+                  </select>
                 </div>
 
                 <div>
@@ -1042,7 +1053,7 @@ export default function AdminStudioPage() {
                     checked={selectedWedding.require_photo_approval}
                     onChange={(e) => updateField('require_photo_approval', e.target.checked)}
                   />
-                  Require administrator approval before guest photos appear publicly
+                  Require administrator approval before guest uploads appear publicly
                 </label>
 
                 <label className="flex items-center gap-2.5 text-xs font-medium cursor-pointer">
@@ -1053,7 +1064,7 @@ export default function AdminStudioPage() {
                       updateField('restrict_uploads_until_wedding_day', e.target.checked)
                     }
                   />
-                  Restrict guest photo uploads until the wedding day
+                  Restrict guest uploads until the wedding day
                 </label>
               </div>
 
@@ -1066,11 +1077,11 @@ export default function AdminStudioPage() {
               </button>
             </form>
 
-            {/* Photo Moderation + Bulk ZIP Download */}
+            {/* Photos & Videos Moderation + Bulk ZIP Download */}
             <div className="rounded-3xl bg-white border border-[#E8DFD3] p-6">
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <h3 className="font-serif text-xl font-semibold">
-                  Guest Photos Moderation ({photos.length})
+                  Guest Photos &amp; Videos Moderation ({photos.length})
                 </h3>
                 <button
                   type="button"
@@ -1085,16 +1096,39 @@ export default function AdminStudioPage() {
 
               {photos.length === 0 ? (
                 <p className="text-xs text-[#7A6F67]">
-                  No guest photos uploaded yet. Share the Table QR Card to start collecting memories.
+                  No guest photos or videos uploaded yet. Share the Table QR Card to start collecting memories.
                 </p>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                   {photos.map((photo) => (
                     <div
                       key={photo.id}
-                      className="rounded-xl border border-[#E8DFD3] overflow-hidden"
+                      className="rounded-xl border border-[#E8DFD3] overflow-hidden bg-[#FAF8F5]/40"
                     >
-                      <img src={photo.image_url} alt="" className="h-32 w-full object-cover" />
+                      {photo.media_type === 'video' ? (
+                        <video
+                          src={photo.image_url}
+                          controls
+                          playsInline
+                          preload="metadata"
+                          className="h-32 w-full bg-black object-cover"
+                        />
+                      ) : (
+                        <img
+                          src={photo.image_url}
+                          alt={photo.caption || photo.guest_name}
+                          className="h-32 w-full object-cover"
+                        />
+                      )}
+                      <div className="px-2.5 pt-2">
+                        <p className="truncate text-[11px] font-semibold text-[#2C2520]">
+                          {photo.guest_name}
+                        </p>
+                        <p className="truncate text-[10px] text-[#7A6F67]">
+                          {photo.moment_tag}
+                          {photo.media_type === 'video' ? ' • Video' : ''}
+                        </p>
+                      </div>
                       <div className="p-2 flex items-center justify-between text-xs">
                         <button
                           type="button"

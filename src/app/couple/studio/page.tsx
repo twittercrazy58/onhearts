@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { QRCodeSVG } from 'qrcode.react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import imageCompression from 'browser-image-compression';
@@ -44,6 +43,19 @@ function toLocalDateTimeInput(isoString: string): string {
   if (isNaN(date.getTime())) return '';
   const offsetMs = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function getMediaExtension(photo: GuestPhoto, blobType: string): string {
+  if (photo.media_type === 'video' || blobType.startsWith('video/')) {
+    if (blobType.includes('quicktime') || photo.image_url.toLowerCase().endsWith('.mov')) {
+      return 'mov';
+    }
+    if (blobType.includes('webm') || photo.image_url.toLowerCase().endsWith('.webm')) {
+      return 'webm';
+    }
+    return 'mp4';
+  }
+  return blobType.includes('png') ? 'png' : 'jpg';
 }
 
 export default function CoupleBackroomPage() {
@@ -168,7 +180,7 @@ export default function CoupleBackroomPage() {
           const incoming = payload.new as Wedding;
           setWedding((current) => {
             if (!current || current.id !== incoming.id) return current;
-           const merged: Wedding = { ...incoming };
+            const merged: Wedding = { ...incoming };
             dirtyFieldsRef.current.forEach((key) => {
               (merged as unknown as Record<string, unknown>)[key] = current[key];
             });
@@ -397,23 +409,23 @@ export default function CoupleBackroomPage() {
     await supabase.from('guest_photos').update({ is_approved: updated }).eq('id', photo.id);
     setPhotos((prev) => prev.map((p) => (p.id === photo.id ? { ...p, is_approved: updated } : p)));
     notify({
-      title: updated ? 'Photo approved and live' : 'Photo hidden from public gallery',
+      title: updated ? 'Memory approved and live' : 'Memory hidden from public gallery',
       variant: 'info',
     });
   }
 
   async function deletePhoto(id: string) {
     const approved = await confirm({
-      title: 'Remove Guest Photo?',
-      description: 'This photo will be permanently deleted from your wedding gallery.',
-      confirmLabel: 'Remove Photo',
+      title: 'Remove Guest Memory?',
+      description: 'This photo or video will be permanently deleted from your wedding gallery.',
+      confirmLabel: 'Remove Memory',
       destructive: true,
     });
     if (!approved) return;
 
     await supabase.from('guest_photos').delete().eq('id', id);
     setPhotos((prev) => prev.filter((p) => p.id !== id));
-    notify({ title: 'Guest photo deleted', variant: 'info' });
+    notify({ title: 'Guest memory deleted', variant: 'info' });
   }
 
   async function deleteWish(id: string) {
@@ -443,19 +455,25 @@ export default function CoupleBackroomPage() {
           try {
             const response = await fetch(photo.image_url);
             const blob = await response.blob();
-            const extension = blob.type.includes('png') ? 'png' : 'jpg';
+            const extension = getMediaExtension(photo, blob.type);
             const safeGuest = photo.guest_name.replace(/[^a-zA-Z0-9_-]/g, '_') || 'Guest';
             const safeTag = photo.moment_tag.replace(/[^a-zA-Z0-9_-]/g, '_');
-            folder.file(`${String(idx + 1).padStart(3, '0')}_${safeTag}_${safeGuest}.${extension}`, blob);
+            folder.file(
+              `${String(idx + 1).padStart(3, '0')}_${safeTag}_${safeGuest}.${extension}`,
+              blob
+            );
           } catch (err) {
-            console.error('Failed to bundle image:', photo.image_url, err);
+            console.error('Failed to bundle media:', photo.image_url, err);
           }
         })
       );
 
       const content = await zip.generateAsync({ type: 'blob' });
-      saveAs(content, `OneHearts-${wedding.slug}-Photos.zip`);
-      notify({ title: 'Download started', description: 'All wedding photos bundled into ZIP.' });
+      saveAs(content, `OneHearts-${wedding.slug}-Memories.zip`);
+      notify({
+        title: 'Download started',
+        description: 'All wedding photos and videos bundled into ZIP.',
+      });
     } finally {
       setZipping(false);
     }
@@ -497,7 +515,6 @@ export default function CoupleBackroomPage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-[#2C2520]">
-      
       <header className="bg-white border-b border-[#E8DFD3] px-6 py-4 flex flex-wrap items-center justify-between gap-4">
         <BrandLogo size="md" />
         <div className="flex items-center gap-3 sm:gap-4">
@@ -541,12 +558,12 @@ export default function CoupleBackroomPage() {
             <QrCode className="w-3.5 h-3.5" style={{ color: activeColor }} /> Reception Table QR Card
           </h2>
 
-         <PrintableTableQrCard
-          partner1Name={wedding.partner1_name}
-          partner2Name={wedding.partner2_name}
-          scanUrl={guestUploadUrl}
-          accentColor={activeColor}
-        />
+          <PrintableTableQrCard
+            partner1Name={wedding.partner1_name}
+            partner2Name={wedding.partner2_name}
+            scanUrl={guestUploadUrl}
+            accentColor={activeColor}
+          />
 
           <div className="grid grid-cols-2 gap-2">
             <button
@@ -893,7 +910,7 @@ export default function CoupleBackroomPage() {
                   checked={wedding.require_photo_approval}
                   onChange={(e) => updateField('require_photo_approval', e.target.checked)}
                 />
-                Require our approval before guest photos appear publicly
+                Require our approval before guest uploads appear publicly
               </label>
 
               <label className="flex items-center gap-2.5 text-xs font-medium cursor-pointer">
@@ -904,7 +921,7 @@ export default function CoupleBackroomPage() {
                     updateField('restrict_uploads_until_wedding_day', e.target.checked)
                   }
                 />
-                Restrict guest photo uploads until our wedding day
+                Restrict guest uploads until our wedding day
               </label>
             </div>
 
@@ -918,11 +935,11 @@ export default function CoupleBackroomPage() {
             </button>
           </form>
 
-          {/* Guest Photo Moderation + ZIP Export */}
+          {/* Guest Photos & Videos Moderation + ZIP Export */}
           <div className="rounded-3xl bg-white border border-[#E8DFD3] p-6">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <h2 className="font-serif text-xl font-semibold">
-                Guest Photos ({photos.length})
+                Guest Photos &amp; Videos ({photos.length})
               </h2>
               <button
                 type="button"
@@ -938,17 +955,40 @@ export default function CoupleBackroomPage() {
 
             {photos.length === 0 ? (
               <p className="text-xs text-[#7A6F67]">
-                No guest photos uploaded yet. Print your Table QR Card to collect memories on your
-                wedding day.
+                No guest photos or videos uploaded yet. Print your Table QR Card to collect memories
+                on your wedding day.
               </p>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 {photos.map((photo) => (
                   <div
                     key={photo.id}
-                    className="rounded-xl border border-[#E8DFD3] overflow-hidden"
+                    className="rounded-xl border border-[#E8DFD3] overflow-hidden bg-[#FAF8F5]/40"
                   >
-                    <img src={photo.image_url} alt="" className="h-32 w-full object-cover" />
+                    {photo.media_type === 'video' ? (
+                      <video
+                        src={photo.image_url}
+                        controls
+                        playsInline
+                        preload="metadata"
+                        className="h-32 w-full bg-black object-cover"
+                      />
+                    ) : (
+                      <img
+                        src={photo.image_url}
+                        alt={photo.caption || photo.guest_name}
+                        className="h-32 w-full object-cover"
+                      />
+                    )}
+                    <div className="px-2.5 pt-2">
+                      <p className="truncate text-[11px] font-semibold text-[#2C2520]">
+                        {photo.guest_name}
+                      </p>
+                      <p className="truncate text-[10px] text-[#7A6F67]">
+                        {photo.moment_tag}
+                        {photo.media_type === 'video' ? ' • Video' : ''}
+                      </p>
+                    </div>
                     <div className="p-2 flex items-center justify-between text-xs">
                       <button
                         type="button"
