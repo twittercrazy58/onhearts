@@ -31,6 +31,7 @@ export const { GET, POST } = uploadHandler({
     maxSize: '25mb',
     contentTypes: ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v'],
   },
+  multipart: '5mb',
   input: weddingInputSchema,
   onBeforeUpload: async ({ file, input }) => {
     const { data: wedding } = await supabasePublic
